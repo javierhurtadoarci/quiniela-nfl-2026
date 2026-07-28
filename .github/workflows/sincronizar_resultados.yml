@@ -42,11 +42,13 @@ jobs:
     timeout-minutes: 10
 
     steps:
+      # v7 en ambas: las versiones anteriores corren sobre Node 20, que GitHub
+      # ya declaro obsoleto y fuerza a Node 24 con una advertencia en cada job.
       - name: Descargar el repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Preparar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
