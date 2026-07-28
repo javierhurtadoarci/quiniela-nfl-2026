@@ -1,0 +1,15 @@
+# Normaliza los saltos de linea al guardar en el repositorio.
+* text=auto
+
+# Estos SIEMPRE con LF: los ejecuta un runner Linux (GitHub Actions) y con
+# CRLF el interprete de bash falla con errores tipo "$'\r': command not found".
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.sh    text eol=lf
+
+# Datos y scripts que se leen en ambos sistemas
+*.py    text
+*.sql   text
+*.toml  text
+*.md    text
+*.csv   text

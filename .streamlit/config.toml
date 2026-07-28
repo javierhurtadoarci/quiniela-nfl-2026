@@ -1,0 +1,12 @@
+# Configuracion de Streamlit para la Quiniela NFL 2026
+
+[server]
+# Tope de subida en MB. La app reduce cada foto a ~20 KB antes de guardarla,
+# asi que este limite solo evita que alguien intente cargar un archivo enorme.
+maxUploadSize = 8
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#013369"

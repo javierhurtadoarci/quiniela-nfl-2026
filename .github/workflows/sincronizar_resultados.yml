@@ -1,0 +1,68 @@
+# =============================================================================
+#  Sincronizacion automatica de marcadores NFL
+# =============================================================================
+#  Trae de ESPN los resultados de partidos ya finalizados y los escribe en
+#  Supabase. Los marcadores con `editado_manual = true` nunca se sobrescriben.
+#
+#  SECRETOS REQUERIDOS  (repo -> Settings -> Secrets and variables -> Actions)
+#    SUPABASE_URL          https://TU-PROYECTO.supabase.co
+#    SUPABASE_SERVICE_KEY  service_role key (Settings -> API Keys -> Reveal)
+#
+#  Se usa la service_role porque el cron no inicia sesion como administrador y
+#  las politicas RLS solo dejan escribir en `results` al admin autenticado.
+#  Esa clave vive unicamente en los secretos de GitHub: nunca en el codigo,
+#  nunca en secrets.toml, nunca en la app.
+# =============================================================================
+
+name: Sincronizar resultados NFL
+
+on:
+  schedule:
+    # Horarios UTC. La NFL juega jueves, domingo y lunes por la noche (ET),
+    # asi que se revisa de madrugada UTC del dia siguiente, ya con todo final.
+    - cron: "0 5,8,12 * * 5"    # viernes: cierra los partidos del jueves
+    - cron: "0 2,5,8 * * 1"     # lunes:   cierra la jornada del domingo
+    - cron: "0 5,8,12 * * 2"    # martes:  cierra el Monday Night
+  workflow_dispatch:
+    # Permite ejecutarlo a mano desde la pestana Actions.
+    inputs:
+      semana:
+        description: "Jornada especifica (vacio = deteccion automatica)"
+        required: false
+        type: string
+      simular:
+        description: "Simular sin escribir"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  sincronizar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependencias
+        run: pip install --quiet supabase
+
+      - name: Sincronizar
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.semana }}" ]; then
+            ARGS="$ARGS --semana ${{ github.event.inputs.semana }}"
+          fi
+          if [ "${{ github.event.inputs.simular }}" = "true" ]; then
+            ARGS="$ARGS --simular"
+          fi
+          python sincronizador.py $ARGS
