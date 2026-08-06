@@ -1974,6 +1974,7 @@ def panel_sincronizacion(partidos: pd.DataFrame, resultados: pd.DataFrame) -> No
 
 
 CAMBIOS_CALENDARIO = "_cambios_calendario"
+AVISO_CALENDARIO = "_aviso_calendario"
 
 
 def panel_calendario(partidos: pd.DataFrame) -> None:
@@ -1996,6 +1997,13 @@ def panel_calendario(partidos: pd.DataFrame) -> None:
         "voto: si la hora guardada esta vieja, los picks se cierran a destiempo."
     )
 
+    # El resultado de la ultima escritura se guarda para mostrarlo DESPUES del
+    # rerun. Un st.success() seguido de st.rerun() no se alcanza a ver: la
+    # pantalla se redibuja antes de que el mensaje llegue.
+    aviso = st.session_state.pop(AVISO_CALENDARIO, None)
+    if aviso:
+        st.success(aviso)
+
     incluir_playoffs = st.checkbox(
         "Incluir playoffs (comodines hasta Super Bowl)",
         value=bool((partidos["semana"] > 18).any()),
@@ -2005,10 +2013,19 @@ def panel_calendario(partidos: pd.DataFrame) -> None:
 
     c1, c2 = st.columns(2)
     revisar = c1.button("Revisar cambios", use_container_width=True)
+    # `disabled` se evalua al dibujar el boton, antes de que exista la
+    # comparacion. Por eso la revision termina en st.rerun(): si no, en la misma
+    # pasada en que aparecen los cambios este boton seguiria en gris.
+    # Se exige que haya algo REAL que escribir: tras una revision sin novedades
+    # el resultado existe pero viene vacio, y habilitar el boton ahi solo llevaria
+    # a un "0 insertados, 0 corregidos".
+    revisado = st.session_state.get(CAMBIOS_CALENDARIO) or {}
+    hay_pendientes = bool(revisado.get("nuevos") or revisado.get("reprogramados"))
     aplicar = c2.button(
         "Aplicar", type="primary", use_container_width=True,
-        disabled=not st.session_state.get(CAMBIOS_CALENDARIO),
-        help="Se habilita despues de revisar.",
+        disabled=not hay_pendientes,
+        help="Se habilita cuando la revision encuentre algo que cambiar."
+             if not hay_pendientes else None,
     )
 
     if revisar:
@@ -2026,6 +2043,7 @@ def panel_calendario(partidos: pd.DataFrame) -> None:
             except Exception as exc:
                 st.error(f"No se pudo consultar el calendario: {exc}")
                 return
+        st.rerun()
 
     cambios = st.session_state.get(CAMBIOS_CALENDARIO)
     if not cambios:
@@ -2084,10 +2102,11 @@ def panel_calendario(partidos: pd.DataFrame) -> None:
                 )
                 return
         st.session_state.pop(CAMBIOS_CALENDARIO, None)
-        invalidar_cache()
-        st.success(
-            f"Listo: {insertados} partidos insertados y {actualizados} horarios corregidos."
+        st.session_state[AVISO_CALENDARIO] = (
+            f"Listo: {insertados} partidos insertados y {actualizados} horarios "
+            "corregidos. El calendario de la app ya refleja los cambios."
         )
+        invalidar_cache()
         st.rerun()
 
 
