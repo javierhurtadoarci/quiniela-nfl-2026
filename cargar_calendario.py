@@ -335,6 +335,71 @@ def tipo_de_clave(key: str) -> str:
     return "desconocida"
 
 
+def comparar_con_base(cliente, partidos: list[dict]) -> dict:
+    """
+    Contrasta lo descargado de ESPN con lo que ya hay en `matches`.
+
+    No escribe nada: solo reporta. Recibe el cliente ya construido en lugar de
+    crearlo, para que tanto la linea de comandos -que usa la service_role- como
+    el Panel Admin -que usa la sesion del administrador- compartan exactamente
+    esta logica y no haya dos versiones que puedan discrepar.
+
+    Devuelve {'previos', 'iguales', 'nuevos', 'reprogramados'}, donde cada
+    reprogramado es (id, registro_anterior, partido_nuevo).
+    """
+    previos = (
+        cliente.table("matches")
+        .select("id, semana, equipo_local, equipo_visitante, fecha_hora")
+        .limit(10000)
+        .execute()
+    ).data or []
+    indice = {_clave(p["semana"], p["equipo_local"], p["equipo_visitante"]): p for p in previos}
+
+    nuevos, reprogramados, iguales = [], [], 0
+    for p in partidos:
+        anterior = indice.get(_clave(p["semana"], p["equipo_local"], p["equipo_visitante"]))
+        if anterior is None:
+            nuevos.append(p)
+            continue
+        # Se comparan solo los 16 primeros caracteres (hasta el minuto): la base
+        # devuelve la fecha con segundos y otra separacion, y compararlas en
+        # crudo marcaria como reprogramado todo el calendario.
+        antes = str(anterior.get("fecha_hora") or "")[:16].replace(" ", "T")
+        ahora = str(p["fecha_hora"])[:16]
+        if antes != ahora:
+            reprogramados.append((anterior["id"], anterior, p))
+        else:
+            iguales += 1
+
+    return {
+        "previos": len(previos),
+        "iguales": iguales,
+        "nuevos": nuevos,
+        "reprogramados": reprogramados,
+    }
+
+
+def aplicar_cambios(cliente, cambios: dict) -> tuple[int, int]:
+    """
+    Escribe lo que `comparar_con_base` encontro. Devuelve (insertados, actualizados).
+
+    Solo inserta partidos que no existian y actualiza la fecha de los movidos.
+    NUNCA borra: los pronosticos ya registrados dependen de esos `match_id`.
+    """
+    nuevos = cambios.get("nuevos") or []
+    reprogramados = cambios.get("reprogramados") or []
+
+    for i in range(0, len(nuevos), 100):
+        cliente.table("matches").insert(nuevos[i : i + 100]).execute()
+
+    for match_id, _, nuevo in reprogramados:
+        cliente.table("matches").update(
+            {"fecha_hora": nuevo["fecha_hora"]}
+        ).eq("id", match_id).execute()
+
+    return len(nuevos), len(reprogramados)
+
+
 def subir_a_supabase(partidos: list[dict], simular: bool = False) -> None:
     """
     Carga idempotente: se puede ejecutar las veces que haga falta sin duplicar.
@@ -392,42 +457,22 @@ def subir_a_supabase(partidos: list[dict], simular: bool = False) -> None:
         )
 
     cliente = create_client(url, key)
+    cambios = comparar_con_base(cliente, partidos)
 
-    previos = (
-        cliente.table("matches")
-        .select("id, semana, equipo_local, equipo_visitante, fecha_hora")
-        .limit(10000)
-        .execute()
-    ).data or []
-    indice = {_clave(p["semana"], p["equipo_local"], p["equipo_visitante"]): p for p in previos}
-    print(f"\nLa tabla `matches` tiene {len(previos)} partidos registrados.")
+    print(f"\nLa tabla `matches` tiene {cambios['previos']} partidos registrados.")
+    print(f"  Ya existen y sin cambios : {cambios['iguales']}")
+    print(f"  Por insertar             : {len(cambios['nuevos'])}")
+    print(f"  Con horario reprogramado : {len(cambios['reprogramados'])}")
 
-    nuevos, reprogramados, iguales = [], [], 0
-    for p in partidos:
-        anterior = indice.get(_clave(p["semana"], p["equipo_local"], p["equipo_visitante"]))
-        if anterior is None:
-            nuevos.append(p)
-            continue
-        antes = str(anterior.get("fecha_hora") or "")[:16].replace(" ", "T")
-        ahora = str(p["fecha_hora"])[:16]
-        if antes != ahora:
-            reprogramados.append((anterior["id"], anterior, p))
-        else:
-            iguales += 1
-
-    print(f"  Ya existen y sin cambios : {iguales}")
-    print(f"  Por insertar             : {len(nuevos)}")
-    print(f"  Con horario reprogramado : {len(reprogramados)}")
-
-    if reprogramados:
+    if cambios["reprogramados"]:
         print("\n  Cambios de horario detectados:")
-        for _, ant, nue in reprogramados[:15]:
+        for _, ant, nue in cambios["reprogramados"][:15]:
             print(f"    S{nue['semana']:>2} {nue['equipo_local']} vs {nue['equipo_visitante']}")
             print(f"        {str(ant.get('fecha_hora'))[:16]}  ->  {nue['fecha_hora'][:16]}")
-        if len(reprogramados) > 15:
-            print(f"    ... y {len(reprogramados) - 15} mas")
+        if len(cambios["reprogramados"]) > 15:
+            print(f"    ... y {len(cambios['reprogramados']) - 15} mas")
 
-    if not nuevos and not reprogramados:
+    if not cambios["nuevos"] and not cambios["reprogramados"]:
         print("\nNada que hacer: la base ya esta al dia.")
         return
 
@@ -435,20 +480,9 @@ def subir_a_supabase(partidos: list[dict], simular: bool = False) -> None:
         print("\n[SIMULACION] No se escribio nada.")
         return
 
-    if nuevos:
-        print(f"\nInsertando {len(nuevos)} partidos nuevos...")
-        for i in range(0, len(nuevos), 100):
-            cliente.table("matches").insert(nuevos[i : i + 100]).execute()
-            print(f"  {min(i + 100, len(nuevos))}/{len(nuevos)}")
-
-    if reprogramados:
-        print(f"Actualizando {len(reprogramados)} horarios...")
-        for match_id, _, nuevo in reprogramados:
-            cliente.table("matches").update(
-                {"fecha_hora": nuevo["fecha_hora"]}
-            ).eq("id", match_id).execute()
-
-    print("\nListo. Ningun partido fue duplicado ni eliminado.")
+    insertados, actualizados = aplicar_cambios(cliente, cambios)
+    print(f"\nInsertados {insertados}, horarios actualizados {actualizados}.")
+    print("Ningun partido fue duplicado ni eliminado.")
 
 
 # -----------------------------------------------------------------------------

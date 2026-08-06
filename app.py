@@ -1973,10 +1973,131 @@ def panel_sincronizacion(partidos: pd.DataFrame, resultados: pd.DataFrame) -> No
         )
 
 
+CAMBIOS_CALENDARIO = "_cambios_calendario"
+
+
+def panel_calendario(partidos: pd.DataFrame) -> None:
+    """
+    Actualiza `matches` desde ESPN: horarios reprogramados y rondas de playoffs.
+
+    Usa la sesion del administrador, no una clave de servicio. La politica
+    `matches_admin` deja escribir a quien esta autenticado y pasa `es_admin()`,
+    que es justo el caso aqui. El script `cargar_calendario.py` necesita la
+    service_role solo porque corre suelto, sin iniciar sesion; desde el panel no
+    hace falta, y ademas las politicas RLS siguen aplicando -si algo esta mal
+    configurado, este boton se topa con el limite igual que cualquiera-.
+
+    La comparacion es la misma funcion que usa la linea de comandos, para que no
+    existan dos versiones de la logica que puedan discrepar.
+    """
+    st.caption(
+        "Trae el calendario de ESPN y corrige los horarios que la NFL haya "
+        "movido. Importante ahora que el kickoff decide cuando se cierra el "
+        "voto: si la hora guardada esta vieja, los picks se cierran a destiempo."
+    )
+
+    incluir_playoffs = st.checkbox(
+        "Incluir playoffs (comodines hasta Super Bowl)",
+        value=bool((partidos["semana"] > 18).any()),
+        help="ESPN publica esas rondas con los equipos por definir hasta que "
+             "termina la semana 18. Antes de eso no hay nada que cargar.",
+    )
+
+    c1, c2 = st.columns(2)
+    revisar = c1.button("Revisar cambios", use_container_width=True)
+    aplicar = c2.button(
+        "Aplicar", type="primary", use_container_width=True,
+        disabled=not st.session_state.get(CAMBIOS_CALENDARIO),
+        help="Se habilita despues de revisar.",
+    )
+
+    if revisar:
+        st.session_state.pop(CAMBIOS_CALENDARIO, None)
+        with st.spinner("Consultando ESPN... (la temporada completa tarda unos segundos)"):
+            try:
+                import cargar_calendario as cal
+                descargados = cal.descargar(incluir_playoffs=incluir_playoffs)
+                if not descargados:
+                    st.warning("ESPN no devolvio partidos. Intentalo de nuevo en un momento.")
+                    return
+                st.session_state[CAMBIOS_CALENDARIO] = cal.comparar_con_base(
+                    get_supabase(), descargados
+                )
+            except Exception as exc:
+                st.error(f"No se pudo consultar el calendario: {exc}")
+                return
+
+    cambios = st.session_state.get(CAMBIOS_CALENDARIO)
+    if not cambios:
+        return
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Sin cambios", cambios["iguales"])
+    m2.metric("Por insertar", len(cambios["nuevos"]))
+    m3.metric("Horario movido", len(cambios["reprogramados"]))
+
+    if cambios["nuevos"]:
+        with st.expander(f"Partidos nuevos ({len(cambios['nuevos'])})", expanded=True):
+            for p in cambios["nuevos"][:40]:
+                st.markdown(
+                    f"- **{etiqueta_semana(p['semana'])}** &bull; "
+                    f"{nombre_display(p['equipo_local'])} vs "
+                    f"{nombre_display(p['equipo_visitante'])} &bull; "
+                    f"{formato_fecha(pd.to_datetime(p['fecha_hora'], utc=True))}",
+                    unsafe_allow_html=True,
+                )
+            if len(cambios["nuevos"]) > 40:
+                st.caption(f"... y {len(cambios['nuevos']) - 40} mas")
+
+    if cambios["reprogramados"]:
+        with st.expander(f"Horarios reprogramados ({len(cambios['reprogramados'])})", expanded=True):
+            for _, ant, nue in cambios["reprogramados"][:40]:
+                st.markdown(
+                    f"- **{etiqueta_semana(nue['semana'])}** &bull; "
+                    f"{nombre_display(nue['equipo_local'])} vs "
+                    f"{nombre_display(nue['equipo_visitante'])}<br>"
+                    f"&nbsp;&nbsp;{formato_fecha(pd.to_datetime(ant['fecha_hora'], utc=True))}"
+                    f" &rarr; **{formato_fecha(pd.to_datetime(nue['fecha_hora'], utc=True))}**",
+                    unsafe_allow_html=True,
+                )
+            if len(cambios["reprogramados"]) > 40:
+                st.caption(f"... y {len(cambios['reprogramados']) - 40} mas")
+
+    if not cambios["nuevos"] and not cambios["reprogramados"]:
+        st.success("La base ya esta al dia: no hay nada que aplicar.")
+        return
+
+    st.info(
+        "Aplicar solo inserta los partidos que faltan y corrige fechas. "
+        "Nunca borra: los pronosticos ya registrados no corren riesgo."
+    )
+
+    if aplicar:
+        with st.spinner("Escribiendo en la base..."):
+            try:
+                import cargar_calendario as cal
+                insertados, actualizados = cal.aplicar_cambios(get_supabase(), cambios)
+            except Exception as exc:
+                st.error(
+                    "No se pudo escribir el calendario. Si el error menciona "
+                    f"permisos, revisa que tu cuenta sea la de ADMIN_EMAIL. ({exc})"
+                )
+                return
+        st.session_state.pop(CAMBIOS_CALENDARIO, None)
+        invalidar_cache()
+        st.success(
+            f"Listo: {insertados} partidos insertados y {actualizados} horarios corregidos."
+        )
+        st.rerun()
+
+
 def tab_admin(partidos: pd.DataFrame, resultados: pd.DataFrame,
               predicciones: pd.DataFrame) -> None:
     st.subheader("Panel de Administracion")
-    st.caption("Captura de marcadores oficiales, control de bloqueos y moderacion de avatares.")
+    st.caption(
+        "Calendario, captura de marcadores oficiales, control de bloqueos y "
+        "moderacion de avatares."
+    )
 
     if partidos.empty:
         st.warning("No hay partidos en la tabla `matches`.")
@@ -1984,7 +2105,8 @@ def tab_admin(partidos: pd.DataFrame, resultados: pd.DataFrame,
 
     # Mismo motivo que en la navegacion principal: con st.tabs, cada st.rerun()
     # (guardar un marcador, mover un bloqueo) devolvia el panel a "Sincronizar".
-    SECCIONES = ["Sincronizar", "Marcadores", "Bloqueos", "Avatares", "Diagnostico"]
+    SECCIONES = ["Sincronizar", "Marcadores", "Calendario", "Bloqueos",
+                 "Avatares", "Diagnostico"]
     if st.session_state.get("nav_admin") not in SECCIONES:
         st.session_state["nav_admin"] = SECCIONES[0]
     sub = st.segmented_control(
@@ -2066,6 +2188,10 @@ def tab_admin(partidos: pd.DataFrame, resultados: pd.DataFrame,
                         f"Registrado: {previo.get('marcador_local')} - "
                         f"{previo.get('marcador_visitante')} &bull; Ganador oficial: {etiqueta}"
                     )
+
+    # --- Calendario: horarios y playoffs --------------------------------------
+    if sub == "Calendario":
+        panel_calendario(partidos)
 
     # --- Bloqueos manuales ----------------------------------------------------
     if sub == "Bloqueos":

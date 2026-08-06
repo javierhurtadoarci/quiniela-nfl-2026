@@ -15,7 +15,7 @@ Construida con **Streamlit** + **Supabase** (PostgreSQL, Auth y Storage).
 | 🏈 Mis Picks | Los 272 partidos por jornada, con logos, hora local y bloqueo automático al kickoff. Al cerrarse cada partido se destapan las barras de votación de la comunidad y quién votó por cada equipo. |
 | 🏆 Posiciones NFL | Récords reales W-L-T por conferencia y división, calculados desde los marcadores. |
 | 📊 Ranking Global | Tabla general con avatares, podio y desglose de puntos. |
-| ⚙️ Panel Admin | Sincronización con ESPN, captura de marcadores, bloqueos y moderación de avatares. |
+| ⚙️ Panel Admin | Sincronización con ESPN, captura de marcadores, actualización del calendario y playoffs, bloqueos y moderación de avatares. |
 
 ### Puntuación
 
@@ -120,18 +120,39 @@ martes de madrugada. Requiere dos secretos en el repositorio:
 
 ### Calendario
 
+**Panel Admin → Calendario.** Botón *Revisar cambios* para ver qué movió la NFL,
+y *Aplicar* para escribirlo. Una casilla incluye los playoffs.
+
+Conviene revisarlo **cada dos o tres semanas**: la NFL reprograma partidos al
+horario estelar del domingo (*flex scheduling*), y el kickoff es lo que decide
+cuándo se cierra el voto en la base de datos. Si la hora guardada está vieja,
+los picks se cierran a destiempo.
+
+**Los playoffs se cargan al terminar la semana 18**, marcando la casilla. Antes
+de eso ESPN publica esas rondas con los equipos por definir y no hay nada que
+traer.
+
+La carga es idempotente: compara contra lo existente, corrige solo las fechas
+que cambiaron y **nunca borra**, así que los pronósticos ya registrados no
+corren riesgo.
+
+<details>
+<summary>Lo mismo desde la terminal (opcional)</summary>
+
 ```bash
-# Ver cambios sin escribir (recomendado cada par de semanas por el flex scheduling)
-python cargar_calendario.py --subir --simular
-
-# Aplicarlos
-python cargar_calendario.py --subir
-
-# Cargar playoffs (a partir de enero, cuando ESPN los publique)
+python cargar_calendario.py --subir --simular      # ver cambios sin escribir
+python cargar_calendario.py --subir                # aplicarlos
 python cargar_calendario.py --solo-playoffs --subir
 ```
 
-La carga es idempotente: compara contra lo existente, nunca duplica ni borra.
+El script corre sin iniciar sesión, así que necesita la clave `service_role` en
+`.streamlit/secrets.toml` (`SUPABASE_SERVICE_KEY`); con la clave pública, RLS
+rechaza la escritura y el script te avisa antes de intentarlo. **El botón del
+panel no la necesita**: usa tu sesión de administrador, que es lo que la
+política `matches_admin` espera, y por eso es la vía recomendada — esa clave se
+salta todas las políticas de seguridad.
+
+</details>
 
 ---
 
