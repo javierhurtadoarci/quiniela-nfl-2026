@@ -55,10 +55,24 @@ PICK_LOCAL, PICK_VISITANTE, PICK_EMPATE = "LOCAL", "VISITANTE", "EMPATE"
 # -----------------------------------------------------------------------------
 #  Descarga desde ESPN
 # -----------------------------------------------------------------------------
+# Las tres cabeceras son necesarias para que ESPN no responda 403; el porque
+# esta documentado en `cargar_calendario.py`, con las pruebas. NO QUITAR
+# ninguna. Se duplica aqui en lugar de compartirlo para que este script siga
+# siendo autonomo: el cron de GitHub Actions solo instala `supabase`.
+CABECERAS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 def _pedir_json(url: str, intentos: int = 3) -> dict:
     for intento in range(1, intentos + 1):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "quiniela-nfl/1.0"})
+            req = urllib.request.Request(url, headers=CABECERAS)
             with urllib.request.urlopen(req, timeout=25) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:

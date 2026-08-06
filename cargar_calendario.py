@@ -91,10 +91,37 @@ def normaliza(texto: str) -> str:
 # -----------------------------------------------------------------------------
 #  Descarga
 # -----------------------------------------------------------------------------
+# ESPN devuelve 403 segun las cabeceras. No es un endpoint privado -es el mismo
+# JSON que alimenta su web publica- pero su CDN puntua si la peticion parece
+# venir de un navegador de verdad, y las TRES lineas de abajo son necesarias.
+# Comprobado pidiendo la misma URL tres veces por combinacion:
+#
+#   User-Agent propio ("quiniela-nfl/1.0") ........ 403
+#   User-Agent de navegador, y nada mas ........... 403
+#   ... + Accept: application/json ................ 403
+#   ... + Accept-Language ......................... 200   <- esta es
+#   User-Agent de navegador + "*/*" en Accept ..... 403
+#
+# O sea: si te presentas como navegador tienes que comportarte como uno, porque
+# un navegador siempre manda Accept-Language. Y el Accept con "*/*" es la firma
+# por defecto de axios, que su CDN reconoce como cliente automatizado.
+#
+# NO SIMPLIFICAR esta constante: quitar cualquiera de las tres lineas devuelve
+# el 403 y deja sin calendario tanto al panel como al cron.
+CABECERAS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
 def pedir_json(url: str, intentos: int = 3) -> dict:
     for intento in range(1, intentos + 1):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "quiniela-nfl/1.0"})
+            req = urllib.request.Request(url, headers=CABECERAS)
             with urllib.request.urlopen(req, timeout=25) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
