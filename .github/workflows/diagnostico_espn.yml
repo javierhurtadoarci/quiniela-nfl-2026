@@ -1,0 +1,105 @@
+# =============================================================================
+#  DIAGNOSTICO: que fuentes de datos alcanza un servidor
+# =============================================================================
+#  TEMPORAL. ESPN devuelve 403 a las peticiones que salen de un datacenter
+#  -tanto Streamlit Cloud como GitHub Actions- mientras que desde una conexion
+#  domestica responde con normalidad. Como el bloqueo no se puede reproducir en
+#  local, esta prueba se ejecuta desde el mismo sitio donde falla.
+#
+#  Solo hace peticiones GET y no toca la base de datos ni ningun secreto.
+#  Se puede borrar en cuanto se decida por que via se traeran los datos.
+#
+#  Lanzalo en: Actions -> Diagnostico de fuentes -> Run workflow
+# =============================================================================
+
+name: Diagnostico de fuentes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Preparar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Probar cada fuente
+        run: |
+          python - <<'PY'
+          import json
+          import urllib.error
+          import urllib.request
+
+          NAV = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                 "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+          # Las que usa hoy el proyecto, mas otras vias de ESPN que se sirven
+          # desde infraestructura distinta y podrian no estar filtradas igual.
+          # Todas responden 200 desde una conexion domestica: lo que se mide aqui
+          # es cuales siguen respondiendo desde un servidor.
+          CANDIDATAS = [
+              ("ESPN site.api (la actual)",
+               "https://site.api.espn.com/apis/site/v2/sports/football/nfl/"
+               "scoreboard?dates=2026&seasontype=2&week=1&limit=100"),
+              ("ESPN sports.core.api",
+               "https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/"
+               "seasons/2026/types/2/weeks/1/events"),
+              ("ESPN site.web.api",
+               "https://site.web.api.espn.com/apis/v2/scoreboard/header"
+               "?sport=football&league=nfl"),
+              # Plan B: calendario y marcadores publicados como CSV por nflverse.
+              # Se sirve desde la propia GitHub, asi que el runner lo alcanza
+              # seguro; ya verificado que trae los 272 partidos de 2026.
+              ("nflverse games.csv",
+               "https://raw.githubusercontent.com/nflverse/nfldata/master/"
+               "data/games.csv"),
+              # Control: si esta fallara, el problema seria de red del runner y
+              # no de que alguien nos bloquee.
+              ("Control: api.github.com", "https://api.github.com/zen"),
+          ]
+
+          VARIANTES = {
+              "con cabeceras de navegador": {
+                  "User-Agent": NAV,
+                  "Accept": "application/json",
+                  "Accept-Language": "en-US,en;q=0.9",
+              },
+              "sin cabeceras": {},
+          }
+
+          print(f"{'FUENTE':32} {'VARIANTE':28} RESULTADO")
+          print("-" * 88)
+
+          for nombre, url in CANDIDATAS:
+              for etiqueta, headers in VARIANTES.items():
+                  try:
+                      req = urllib.request.Request(url, headers=headers)
+                      with urllib.request.urlopen(req, timeout=20) as r:
+                          cuerpo = r.read(400_000)
+                          detalle = f"{len(cuerpo)} bytes"
+                          try:
+                              datos = json.loads(cuerpo.decode("utf-8", "ignore"))
+                              if isinstance(datos, dict):
+                                  for clave in ("events", "items"):
+                                      if clave in datos:
+                                          detalle = f"{len(datos[clave])} {clave}"
+                                          break
+                          except Exception:
+                              pass
+                          print(f"{nombre:32} {etiqueta:28} OK {r.status} - {detalle}")
+                  except urllib.error.HTTPError as e:
+                      print(f"{nombre:32} {etiqueta:28} HTTP {e.code} {e.reason}")
+                  except Exception as e:
+                      print(f"{nombre:32} {etiqueta:28} {type(e).__name__}: {e}")
+
+          print("-" * 88)
+          print("Cualquier fuente con OK 200 sirve como origen de datos.")
+          PY
