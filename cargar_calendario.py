@@ -91,38 +91,25 @@ def normaliza(texto: str) -> str:
 # -----------------------------------------------------------------------------
 #  Descarga
 # -----------------------------------------------------------------------------
-# ESPN devuelve 403 segun las cabeceras. No es un endpoint privado -es el mismo
-# JSON que alimenta su web publica- pero su CDN puntua si la peticion parece
-# venir de un navegador de verdad, y las TRES lineas de abajo son necesarias.
-# Comprobado pidiendo la misma URL tres veces por combinacion:
+# ESPN devuelve 403 segun las cabeceras, y el criterio CAMBIA segun desde donde
+# se pida. Medido con la misma URL desde los dos entornos donde corre esto:
 #
-#   User-Agent propio ("quiniela-nfl/1.0") ........ 403
-#   User-Agent de navegador, y nada mas ........... 403
-#   ... + Accept: application/json ................ 403
-#   ... + Accept-Language ......................... 200   <- esta es
-#   User-Agent de navegador + "*/*" en Accept ..... 403
+#                                      IP domestica    servidor (Actions/Cloud)
+#   User-Agent "quiniela-nfl/1.0"          403                  403
+#   User-Agent de navegador, solo          403                  403
+#   ... + Accept + Accept-Language         200                  403
+#   sin ninguna cabecera                   200                  200   <- la buena
 #
-# O sea: si te presentas como navegador tienes que comportarte como uno, porque
-# un navegador siempre manda Accept-Language. Y el Accept con "*/*" es la firma
-# por defecto de axios, que su CDN reconoce como cliente automatizado.
+# Presentarse como Chrome desde un datacenter es justo lo que su CDN penaliza:
+# ningun navegador de verdad sale de ahi. Sin cabeceras, urllib se identifica
+# como lo que es -un cliente automatizado- y lo dejan pasar en ambos sitios.
 #
-# NO SIMPLIFICAR esta constante: quitar cualquiera de las tres lineas devuelve
-# el 403 y deja sin calendario tanto al panel como al cron.
-CABECERAS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
-
+# NO AGREGAR CABECERAS AQUI. Poner un User-Agent "decente" parece una mejora y
+# deja sin datos al cron y al panel, que es donde de verdad importa.
 def pedir_json(url: str, intentos: int = 3) -> dict:
     for intento in range(1, intentos + 1):
         try:
-            req = urllib.request.Request(url, headers=CABECERAS)
-            with urllib.request.urlopen(req, timeout=25) as resp:
+            with urllib.request.urlopen(url, timeout=25) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             if intento == intentos:
