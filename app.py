@@ -370,12 +370,45 @@ COOKIE_TOKEN = "nfl26_refresh"
 COOKIE_EMAIL_LEGADO = "nfl26_email"   # de versiones anteriores: solo se borra
 DIAS_SESION = 30
 
+# Operaciones de cookie a la espera de ejecutarse. Ver `recordar_sesion`.
+TOKEN_PENDIENTE = "_refresh_pendiente"
+BORRADO_PENDIENTE = "_cookie_a_borrar"
+
 
 def get_cookie_manager() -> stx.CookieManager:
     """Una instancia por sesion, por el mismo motivo que `get_supabase`."""
     if "cookie_mgr" not in st.session_state:
         st.session_state["cookie_mgr"] = stx.CookieManager(key="nfl26_cookies")
     return st.session_state["cookie_mgr"]
+
+
+def _url_app() -> str:
+    """URL con la que el navegador abrio la app. Vacia fuera de un run."""
+    try:
+        return str(st.context.url or "")
+    except Exception:
+        return ""
+
+
+def _token_guardado() -> str | None:
+    """
+    Refresh token que mando el navegador, si hay alguno.
+
+    Se lee de `st.context.cookies` -las cookies que viajan en la propia peticion-
+    y no del componente: el componente necesita un ida y vuelta con el cliente y
+    en el primer run todavia no ha contestado, con lo que la app mostraba el
+    login antes de enterarse de que habia sesion guardada. El componente queda
+    como respaldo por si esa via no estuviera disponible.
+    """
+    try:
+        valor = st.context.cookies.get(COOKIE_TOKEN)
+        if valor:
+            return str(valor)
+    except Exception:
+        pass
+    cookies = get_cookie_manager().get_all(key="get_all_cookies") or {}
+    valor = cookies.get(COOKIE_TOKEN)
+    return str(valor) if valor else None
 
 
 def _email_de_sesion(respuesta) -> str | None:
@@ -396,37 +429,71 @@ def _email_de_sesion(respuesta) -> str | None:
     return None
 
 
-def guardar_cookies(refresh_token: str | None) -> None:
+def recordar_sesion(refresh_token: str | None) -> None:
     """
-    Persiste la sesion 30 dias guardando solo el refresh token.
+    Agenda la escritura de la cookie para el arranque del siguiente run.
 
-    `secure` la restringe a https -los navegadores consideran localhost seguro,
-    asi que el desarrollo local sigue funcionando- y `same_site='strict'` impide
-    que viaje en peticiones originadas desde otro sitio.
+    NO la escribe aqui a proposito. `cm.set` no guarda nada en el acto: renderiza
+    un componente cuyo JavaScript escribe la cookie en el navegador. Si el script
+    termina antes de que ese ida y vuelta se complete -y un `st.rerun()` justo
+    despues lo aborta- la cookie no llega a existir nunca. Era exactamente lo que
+    pasaba al iniciar sesion: se pedia guardar la cookie y una linea despues se
+    hacia rerun, asi que la sesion no sobrevivia a cerrar el navegador.
 
-    No puede marcarse HttpOnly porque el componente la escribe desde JavaScript.
-    Por eso la app escapa con `html_escape` todo lo que pasa por
-    `unsafe_allow_html`: un XSS seria la unica forma de leer este token.
+    Dejando el token aqui, `sincronizar_cookies()` lo guarda al principio de un
+    run que si se renderiza entero.
     """
-    if not refresh_token:
+    if refresh_token:
+        st.session_state[TOKEN_PENDIENTE] = refresh_token
+
+
+def olvidar_sesion() -> None:
+    """
+    Agenda el borrado de la cookie, por el mismo motivo que `recordar_sesion`.
+
+    El cierre de sesion tenia el mismo defecto que el login: pedia borrar la
+    cookie y hacia rerun acto seguido, con lo que el borrado tampoco llegaba al
+    navegador. Se notaba menos porque `sign_out()` revoca el token del lado de
+    Supabase, pero dejaba la sesion dependiendo de que esa llamada no fallara.
+    """
+    st.session_state.pop(TOKEN_PENDIENTE, None)
+    st.session_state[BORRADO_PENDIENTE] = True
+
+
+def sincronizar_cookies() -> None:
+    """
+    Unico punto del que salen escrituras y borrados de cookie en toda la app.
+
+    Concentrarlo aqui garantiza dos cosas: que la operacion ocurra dentro de un
+    run que se renderiza entero -si no, el componente no alcanza a hablar con el
+    navegador y no pasa nada-, y que nunca coincidan dos llamadas en el mismo
+    run, que en Streamlit seria un error de clave de widget duplicada.
+    """
+    if st.session_state.pop(BORRADO_PENDIENTE, False):
+        cm = get_cookie_manager()
+        for nombre, k in ((COOKIE_TOKEN, "del_token"), (COOKIE_EMAIL_LEGADO, "del_email")):
+            try:
+                cm.delete(nombre, key=k)
+            except Exception:
+                pass
+        return
+
+    token = st.session_state.pop(TOKEN_PENDIENTE, None)
+    if not token:
         return
     get_cookie_manager().set(
         COOKIE_TOKEN,
-        refresh_token,
+        token,
         expires_at=datetime.now() + timedelta(days=DIAS_SESION),
-        secure=True,
-        same_site="strict",
+        # Solo en https. Forzarlo siempre haria que el navegador descartara la
+        # cookie en un `http://` de desarrollo que no sea localhost.
+        secure=_url_app().lower().startswith("https://"),
+        # 'lax' y no 'strict': con strict el navegador no manda la cookie cuando
+        # se llega a la app desde un enlace externo, que es justo como la abre
+        # la mayoria. Sigue sin viajar en peticiones cross-site que escriban.
+        same_site="lax",
         key="set_token",
     )
-
-
-def limpiar_cookies() -> None:
-    cm = get_cookie_manager()
-    for nombre, k in ((COOKIE_TOKEN, "del_token"), (COOKIE_EMAIL_LEGADO, "del_email")):
-        try:
-            cm.delete(nombre, key=k)
-        except Exception:
-            pass
 
 
 def restaurar_sesion() -> None:
@@ -438,8 +505,7 @@ def restaurar_sesion() -> None:
     """
     if st.session_state.get("usuario"):
         return
-    cookies = get_cookie_manager().get_all(key="get_all_cookies") or {}
-    token = cookies.get(COOKIE_TOKEN)
+    token = _token_guardado()
     if not token:
         return
 
@@ -447,19 +513,19 @@ def restaurar_sesion() -> None:
     try:
         sesion = sb.auth.refresh_session(token)
     except Exception:
-        limpiar_cookies()          # token vencido, revocado o manipulado
+        olvidar_sesion()           # token vencido, revocado o manipulado
         return
 
     email = _email_de_sesion(sesion)
     if not email:
-        limpiar_cookies()
+        olvidar_sesion()
         return
 
     # Supabase rota el refresh token en cada canje: si no se guarda el nuevo, la
     # siguiente recarga presentaria uno ya consumido y la sesion se perderia.
     nuevo = getattr(getattr(sesion, "session", None), "refresh_token", None)
     if nuevo and nuevo != token:
-        guardar_cookies(nuevo)
+        recordar_sesion(nuevo)
 
     perfil = obtener_perfil(email)
     if perfil:
@@ -1104,7 +1170,10 @@ def pantalla_auth() -> None:
                         ).execute()
                         perfil = obtener_perfil(email)
                     refresh = getattr(getattr(sesion, "session", None), "refresh_token", None)
-                    guardar_cookies(refresh)
+                    # Agendado, no escrito: el st.rerun() de abajo abortaria el
+                    # componente que guarda la cookie. Lo escribe `main` en el
+                    # run siguiente, que si se renderiza completo.
+                    recordar_sesion(refresh)
                     st.session_state["usuario"] = perfil
                     invalidar_cache()
                     st.success("Bienvenido de vuelta.")
@@ -1336,7 +1405,7 @@ def barra_lateral(usuario: dict) -> None:
                 get_supabase().auth.sign_out()
             except Exception:
                 pass
-            limpiar_cookies()
+            olvidar_sesion()
             st.session_state.pop("usuario", None)
             st.rerun()
 
@@ -2123,6 +2192,12 @@ def main() -> None:
 
     # Cookies primero: si hay sesion previa, se restaura sin pedir credenciales.
     restaurar_sesion()
+
+    # Y aqui se materializa lo que quedo agendado: la cookie del login, la del
+    # token rotado o su borrado al cerrar sesion. Tiene que ir antes de
+    # cualquier `return` de esta funcion, pero dentro de un run que llegue a
+    # renderizarse entero.
+    sincronizar_cookies()
 
     usuario = st.session_state.get("usuario")
     if not usuario:
