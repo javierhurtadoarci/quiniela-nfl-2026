@@ -1350,7 +1350,7 @@ def tab_picks(usuario: dict, partidos: pd.DataFrame, predicciones: pd.DataFrame,
     st.subheader("Mis Picks")
 
     if partidos.empty:
-        st.info("Aun no hay partidos cargados en la tabla `matches`.")
+        st.info("Todavia no hay partidos cargados. Avisale al administrador.")
         return
 
     email = usuario["email"].lower()
@@ -1573,8 +1573,9 @@ def tab_picks(usuario: dict, partidos: pd.DataFrame, predicciones: pd.DataFrame,
 def tab_posiciones(partidos: pd.DataFrame, resultados: pd.DataFrame) -> None:
     st.subheader("Posiciones NFL")
     st.caption(
-        "Records calculados en vivo a partir de los marcadores capturados en `results`. "
-        "PCT considera los empates como medio triunfo."
+        "Records calculados en vivo con los marcadores ya cargados en la app; "
+        "los partidos sin resultado todavia no cuentan. PCT es el porcentaje de "
+        "victorias, donde un empate vale medio triunfo."
     )
 
     standings = calcular_standings(partidos, resultados)
@@ -1904,7 +1905,7 @@ def panel_sincronizacion(partidos: pd.DataFrame, resultados: pd.DataFrame) -> No
 def tab_admin(partidos: pd.DataFrame, resultados: pd.DataFrame,
               predicciones: pd.DataFrame) -> None:
     st.subheader("Panel de Administracion")
-    st.caption("Captura de marcadores oficiales, control de bloqueos y cierre de temporada.")
+    st.caption("Captura de marcadores oficiales, control de bloqueos y moderacion de avatares.")
 
     if partidos.empty:
         st.warning("No hay partidos en la tabla `matches`.")
