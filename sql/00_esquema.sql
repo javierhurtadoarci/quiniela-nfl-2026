@@ -53,13 +53,15 @@ create index if not exists matches_semana_idx on public.matches (semana, fecha_h
 
 -- -----------------------------------------------------------------------------
 --  3. predictions - picks semanales
---     prediction admite exactamente: LOCAL | VISITANTE | EMPATE
+--     prediction admite exactamente: LOCAL | VISITANTE
+--     El empate no se pronostica (es rarisimo en la NFL); si un partido termina
+--     empatado ningun pick coincide y nadie suma puntos en ese partido.
 -- -----------------------------------------------------------------------------
 create table if not exists public.predictions (
     id          bigint generated always as identity primary key,
     email       text        not null,
     match_id    bigint      not null references public.matches (id) on delete cascade,
-    prediction  text        not null check (prediction in ('LOCAL','VISITANTE','EMPATE')),
+    prediction  text        not null check (prediction in ('LOCAL','VISITANTE')),
     creado_en   timestamptz not null default now()
 );
 
@@ -71,6 +73,8 @@ create unique index if not exists predictions_email_match_uidx
 
 -- -----------------------------------------------------------------------------
 --  4. results - marcadores oficiales
+--     Aqui EMPATE si es valido: la NFL permite empates y el marcador oficial
+--     tiene que poder registrarlos, aunque nadie los pueda pronosticar.
 -- -----------------------------------------------------------------------------
 create table if not exists public.results (
     match_id           bigint primary key references public.matches (id) on delete cascade,
@@ -82,36 +86,17 @@ create table if not exists public.results (
 
 
 -- -----------------------------------------------------------------------------
---  5. super_bowl_predictions - un pronostico por participante
+--  5. Verificacion
 -- -----------------------------------------------------------------------------
-create table if not exists public.super_bowl_predictions (
-    email       text primary key,
-    campeon     text not null,
-    subcampeon  text not null,
-    creado_en   timestamptz not null default now()
-);
-
-
--- -----------------------------------------------------------------------------
---  6. tournament_settings - cierre de temporada (una sola fila)
--- -----------------------------------------------------------------------------
-create table if not exists public.tournament_settings (
-    id                 smallint primary key default 1 check (id = 1),
-    actual_champion    text,
-    actual_subcampeon  text
-);
-
-insert into public.tournament_settings (id, actual_champion, actual_subcampeon)
-values (1, null, null)
-on conflict (id) do nothing;
-
-
--- -----------------------------------------------------------------------------
---  7. Verificacion
+--  Hubo dos tablas mas, `super_bowl_predictions` y `tournament_settings`, que
+--  sostenian el pronostico de pretemporada (campeon y subcampeon) y el bonus de
+--  10 y 5 puntos. Ese pronostico se elimino: la quiniela se decide solo con los
+--  aciertos partido a partido. El Super Bowl sigue jugandose como el partido de
+--  la jornada 22 y es el que mas vale, pero se acierta igual que cualquier otro.
+--  Para retirarlas de una base ya creada, usa `08_eliminar_super_bowl.sql`.
 -- -----------------------------------------------------------------------------
 select table_name, column_name, data_type
 from information_schema.columns
 where table_schema = 'public'
-  and table_name in ('users','matches','predictions','results',
-                     'super_bowl_predictions','tournament_settings')
+  and table_name in ('users','matches','predictions','results')
 order by table_name, ordinal_position;

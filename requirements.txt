@@ -1,6 +1,10 @@
-streamlit>=1.40.0
-supabase>=2.9.0
-extra-streamlit-components>=0.1.71
-pandas>=2.2.0
-tzdata>=2024.1
-Pillow>=10.4.0
+# Versiones fijas a proposito. Con `>=` cada despliegue resolvia lo ultimo que
+# hubiera publicado en ese momento: un paquete comprometido o simplemente una
+# version nueva con un cambio incompatible entraba solo, sin que nadie lo
+# decidiera. Subir cualquiera de estas lineas es ahora un acto deliberado.
+streamlit==1.60.0
+supabase==2.31.0
+extra-streamlit-components==0.1.81
+pandas==3.0.5
+tzdata==2026.3
+Pillow==12.3.0

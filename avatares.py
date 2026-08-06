@@ -196,7 +196,17 @@ def borrar_avatar(cliente, auth_uid: str) -> None:
 # -----------------------------------------------------------------------------
 #  Resolucion final
 # -----------------------------------------------------------------------------
-ESQUEMAS_PERMITIDOS = ("https://", "data:image/")
+# Solo https y data URIs de formatos rasterizados. Se excluye `data:image/svg+xml`
+# a proposito: un SVG es un documento y puede traer <script> dentro. Dentro de un
+# <img> el navegador no lo ejecuta, pero basta con que alguien copie esa misma
+# URL a otro contexto para que si corra, y la app no gana nada permitiendolo: los
+# avatares generados son SVG en memoria, no valores guardados en la base.
+ESQUEMAS_PERMITIDOS = (
+    "https://",
+    "data:image/webp;",
+    "data:image/png;",
+    "data:image/jpeg;",
+)
 
 
 def url_segura(valor: str | None) -> str | None:

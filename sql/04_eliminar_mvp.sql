@@ -1,6 +1,11 @@
 -- =============================================================================
 --  ELIMINAR EL PRONOSTICO DE MVP
 -- =============================================================================
+--  OBSOLETO. `08_eliminar_super_bowl.sql` borra la tabla entera, y con ella la
+--  columna `mvp`. Si ya ejecutaste el 08, este archivo fallara porque
+--  `super_bowl_predictions` ya no existe: ignoralo. Se conserva solo para bases
+--  que sigan teniendo la tabla.
+-- =============================================================================
 --  OPCIONAL. La aplicacion ya no lee ni escribe la columna `mvp`, asi que
 --  puedes dejarla en la base sin ningun efecto. Ejecuta esto solo si prefieres
 --  limpiar el esquema.

@@ -12,13 +12,15 @@ Construida con **Streamlit** + **Supabase** (PostgreSQL, Auth y Storage).
 
 | Sección | Contenido |
 |---|---|
-| 🏈 Mis Picks | Los 272 partidos por jornada, con logos, hora local y bloqueo automático al kickoff. Barras de votación de la comunidad y quién votó por cada equipo. |
+| 🏈 Mis Picks | Los 272 partidos por jornada, con logos, hora local y bloqueo automático al kickoff. Al cerrarse cada partido se destapan las barras de votación de la comunidad y quién votó por cada equipo. |
 | 🏆 Posiciones NFL | Récords reales W-L-T por conferencia y división, calculados desde los marcadores. |
-| 💍 Super Bowl | Pronóstico de campeón y subcampeón, cerrado al primer kickoff de la temporada. |
 | 📊 Ranking Global | Tabla general con avatares, podio y desglose de puntos. |
-| ⚙️ Panel Admin | Sincronización con ESPN, captura de marcadores, bloqueos, cierre de temporada y moderación de avatares. |
+| ⚙️ Panel Admin | Sincronización con ESPN, captura de marcadores, bloqueos y moderación de avatares. |
 
 ### Puntuación
+
+Todo se gana partido a partido: se acierta eligiendo al ganador directo. No hay
+bonus de pretemporada ni apuestas paralelas.
 
 | Jornada | Puntos por acierto |
 |---|---|
@@ -28,8 +30,9 @@ Construida con **Streamlit** + **Supabase** (PostgreSQL, Auth y Storage).
 | Final de Conferencia | 4 |
 | Super Bowl | 5 |
 
-Más el pronóstico de pretemporada: **10 puntos** por acertar al campeón y **5**
-por el subcampeón.
+Las rondas finales valen más para que la quiniela siga viva en enero en vez de
+quedar decidida en noviembre. El Super Bowl es el partido que más pesa, y se
+acierta como cualquier otro.
 
 ---
 
@@ -42,19 +45,39 @@ Supabase:
 
 | Archivo | Qué hace |
 |---|---|
-| `00_esquema.sql` | Crea las 6 tablas |
+| `00_esquema.sql` | Crea las 4 tablas |
 | `02_calendario.sql` | Carga los 272 partidos |
 | `01_politicas_rls.sql` | Políticas de seguridad — **edita la línea 17 con tu correo de admin** |
 | `03_sincronizacion.sql` | Habilita la sincronización automática |
 | `05_avatares.sql` | Columna de avatar y bucket de Storage |
+| `07_seguridad.sql` | **Obligatorio.** Cierra el voto al kickoff del lado del servidor y crea el perfil por trigger |
 
-`04_eliminar_mvp.sql` y `99_diagnostico.sql` son opcionales.
+`99_diagnostico.sql` es opcional. Los siguientes solo hacen falta en bases
+creadas antes del cambio que describen; en una instalación nueva no aplican:
+
+| Archivo | Para qué |
+|---|---|
+| `06_sin_empates.sql` | Quita el empate de las opciones de voto |
+| `08_eliminar_super_bowl.sql` | Borra el pronóstico de pretemporada y su bonus |
+| `04_eliminar_mvp.sql` | Obsoleto: el `08` ya borra esa tabla entera |
+
+> **`07_seguridad.sql` va después de `01` y de `05`**, porque reemplaza políticas
+> que ambos definen. Sin él, un participante puede llamar a la API de Supabase
+> por su cuenta y registrar un pick con el partido ya terminado: el bloqueo al
+> kickoff que ves en pantalla es solo la interfaz.
 
 > **No vuelvas a ejecutar `02_calendario.sql`.** Solo inserta y es para la carga
 > inicial. Para agregar playoffs o corregir horarios usa el script de Python.
 
 En **Authentication → Providers → Email**, decide si dejas activada la
-confirmación por correo.
+confirmación por correo. Con `07_seguridad.sql` da igual cuál elijas: el perfil
+público lo crea un trigger al dar de alta la cuenta, ya no la app.
+
+Además, en **Authentication → Policies / Rate limits** conviene activar:
+
+- **Longitud mínima de contraseña: 8** (la app ya la exige, esto lo respalda en el servidor)
+- **Protección contra contraseñas filtradas** (`Leaked password protection`)
+- Los **límites de intentos** por hora, que acotan la fuerza bruta contra el login
 
 ### 2. Credenciales
 
@@ -130,10 +153,16 @@ sql/                    Scripts de base de datos
 
 - Todas las tablas tienen **RLS activo**. La clave pública solo puede hacer lo
   que las políticas permiten.
-- Solo el correo de `ADMIN_EMAIL` puede capturar marcadores o declarar al
-  campeón, y esa restricción vive en la base de datos, no en la interfaz.
+- Solo el correo de `ADMIN_EMAIL` puede capturar marcadores, y esa restricción
+  vive en la base de datos, no en la interfaz.
+- **El cierre al kickoff se impone en la base**, no en la pantalla: un pick no
+  se puede registrar, cambiar ni borrar con el partido ya empezado, y los picks
+  de los demás no son legibles hasta que cierra.
+- La sesión persiste guardando **solo el refresh token** de Supabase Auth. La
+  identidad siempre se deriva de la sesión que Supabase valida, nunca de una
+  cookie: el navegador no decide quién eres.
 - Los nombres de usuario se escapan antes de renderizarse y las URLs de avatar
-  se validan: solo `https://` o `data:image/`.
+  se validan: solo `https://` o `data:image/` de formatos rasterizados.
 - Cada avatar se guarda con el UUID de Supabase Auth, no con el correo, porque
   el bucket es público.
 - La cuenta administradora no participa en la quiniela ni aparece en el ranking.

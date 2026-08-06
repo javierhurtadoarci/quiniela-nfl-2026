@@ -18,10 +18,9 @@
 #  10. PANTALLA DE AUTENTICACION (login / registro)
 #  11. PESTANA: MIS PICKS
 #  12. PESTANA: POSICIONES NFL
-#  13. PESTANA: SUPER BOWL
-#  14. PESTANA: RANKING GLOBAL
-#  15. PESTANA: PANEL ADMIN
-#  16. ORQUESTADOR PRINCIPAL
+#  13. PESTANA: RANKING GLOBAL
+#  14. PESTANA: PANEL ADMIN
+#  15. ORQUESTADOR PRINCIPAL
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -54,9 +53,10 @@ st.set_page_config(
 )
 
 # --- Parametros de negocio ---------------------------------------------------
+# El pronostico de pretemporada (campeon y subcampeon) se elimino: la quiniela
+# se decide solo con los aciertos partido a partido. El Super Bowl como PARTIDO
+# sigue existiendo y es el que mas vale, en PUNTOS_POR_RONDA[22].
 PUNTOS_ACIERTO_REGULAR = 1     # 1 punto por ganador directo (Moneyline)
-PUNTOS_CAMPEON = 10            # Super Bowl: acertar campeon
-PUNTOS_SUBCAMPEON = 5          # Super Bowl: acertar subcampeon
 
 # Los playoffs valen mas conforme avanza el torneo: sin esto la quiniela queda
 # practicamente decidida en noviembre y las rondas finales dejan de importar.
@@ -88,7 +88,13 @@ ETIQUETA_SEMANA = {
 # Valores canonicos almacenados en predictions.prediction y results.ganador_oficial
 PICK_LOCAL = "LOCAL"
 PICK_VISITANTE = "VISITANTE"
+# EMPATE ya no es una opcion de la quiniela: el participante solo elige equipo.
+# Se conserva porque la NFL si permite empates y `results.ganador_oficial` tiene
+# que poder registrarlos; en ese caso simplemente nadie suma puntos.
 PICK_EMPATE = "EMPATE"
+
+# Lo unico que el participante puede votar.
+OPCIONES_PICK = [PICK_LOCAL, PICK_VISITANTE]
 
 ZONAS_SUGERIDAS = [
     "America/Mexico_City",
@@ -119,13 +125,11 @@ from equipos import (
     LOGO_ORIGINAL,
     NFL_TEAMS,
     DIVISIONES,
-    CONFERENCIAS,
     resolver_equipo,
     logo_url,
     nombre_display,
     nombre_corto,
     color_equipo,
-    equipos_por_conferencia,
 )
 import avatares
 
@@ -352,10 +356,19 @@ def sin_admin(df: pd.DataFrame, columna: str = "email") -> pd.DataFrame:
 
 # -----------------------------------------------------------------------------
 #  5. GESTION DE COOKIES Y SESION
-#     extra_streamlit_components mantiene al usuario logueado entre recargas.
+#     La sesion sobrevive a las recargas para que nadie tenga que teclear su
+#     contrasena cada vez que abre la app.
+#
+#     REGLA DE SEGURIDAD: lo unico que se guarda en el navegador es el refresh
+#     token que emite Supabase Auth, y la identidad se toma SIEMPRE de la sesion
+#     que Supabase valida al canjearlo. El correo no se guarda ni se lee de
+#     ninguna cookie: una cookie la escribe quien quiera desde su navegador, asi
+#     que confiar en un correo guardado ahi equivaldria a dejar entrar como
+#     cualquier participante -el admin incluido- con solo editarla.
 # -----------------------------------------------------------------------------
-COOKIE_EMAIL = "nfl26_email"
 COOKIE_TOKEN = "nfl26_refresh"
+COOKIE_EMAIL_LEGADO = "nfl26_email"   # de versiones anteriores: solo se borra
+DIAS_SESION = 30
 
 
 def get_cookie_manager() -> stx.CookieManager:
@@ -365,17 +378,51 @@ def get_cookie_manager() -> stx.CookieManager:
     return st.session_state["cookie_mgr"]
 
 
-def guardar_cookies(email: str, refresh_token: str | None) -> None:
-    cm = get_cookie_manager()
-    expira = datetime.now() + timedelta(days=30)
-    cm.set(COOKIE_EMAIL, email.lower(), expires_at=expira, key="set_email")
-    if refresh_token:
-        cm.set(COOKIE_TOKEN, refresh_token, expires_at=expira, key="set_token")
+def _email_de_sesion(respuesta) -> str | None:
+    """
+    Correo confirmado por Supabase a partir del token, nunca por el navegador.
+
+    Se buscan las dos formas en que la libreria lo expone segun la version
+    (`.user` y `.session.user`) para no depender de una en concreto.
+    """
+    candidatos = (
+        getattr(respuesta, "user", None),
+        getattr(getattr(respuesta, "session", None), "user", None),
+    )
+    for objeto in candidatos:
+        correo = getattr(objeto, "email", None)
+        if correo:
+            return str(correo).lower().strip()
+    return None
+
+
+def guardar_cookies(refresh_token: str | None) -> None:
+    """
+    Persiste la sesion 30 dias guardando solo el refresh token.
+
+    `secure` la restringe a https -los navegadores consideran localhost seguro,
+    asi que el desarrollo local sigue funcionando- y `same_site='strict'` impide
+    que viaje en peticiones originadas desde otro sitio.
+
+    No puede marcarse HttpOnly porque el componente la escribe desde JavaScript.
+    Por eso la app escapa con `html_escape` todo lo que pasa por
+    `unsafe_allow_html`: un XSS seria la unica forma de leer este token.
+    """
+    if not refresh_token:
+        return
+    get_cookie_manager().set(
+        COOKIE_TOKEN,
+        refresh_token,
+        expires_at=datetime.now() + timedelta(days=DIAS_SESION),
+        secure=True,
+        same_site="strict",
+        key="set_token",
+    )
 
 
 def limpiar_cookies() -> None:
     cm = get_cookie_manager()
-    for nombre, k in ((COOKIE_EMAIL, "del_email"), (COOKIE_TOKEN, "del_token")):
+    for nombre, k in ((COOKIE_TOKEN, "del_token"), (COOKIE_EMAIL_LEGADO, "del_email")):
         try:
             cm.delete(nombre, key=k)
         except Exception:
@@ -383,23 +430,38 @@ def limpiar_cookies() -> None:
 
 
 def restaurar_sesion() -> None:
-    """Reconstruye la sesion desde la cookie de refresh token de Supabase Auth."""
+    """
+    Reconstruye la sesion canjeando el refresh token guardado.
+
+    Sin token no hay restauracion: no existe ninguna ruta que acepte una
+    identidad tomada del navegador sin que Supabase la valide antes.
+    """
     if st.session_state.get("usuario"):
         return
-    cm = get_cookie_manager()
-    cookies = cm.get_all(key="get_all_cookies") or {}
-    email = cookies.get(COOKIE_EMAIL)
+    cookies = get_cookie_manager().get_all(key="get_all_cookies") or {}
     token = cookies.get(COOKIE_TOKEN)
-    if not email:
+    if not token:
         return
+
     sb = get_supabase()
-    if token:
-        try:
-            sb.auth.refresh_session(token)
-        except Exception:
-            limpiar_cookies()
-            return
-    perfil = obtener_perfil(str(email).lower())
+    try:
+        sesion = sb.auth.refresh_session(token)
+    except Exception:
+        limpiar_cookies()          # token vencido, revocado o manipulado
+        return
+
+    email = _email_de_sesion(sesion)
+    if not email:
+        limpiar_cookies()
+        return
+
+    # Supabase rota el refresh token en cada canje: si no se guarda el nuevo, la
+    # siguiente recarga presentaria uno ya consumido y la sesion se perderia.
+    nuevo = getattr(getattr(sesion, "session", None), "refresh_token", None)
+    if nuevo and nuevo != token:
+        guardar_cookies(nuevo)
+
+    perfil = obtener_perfil(email)
     if perfil:
         st.session_state["usuario"] = perfil
 
@@ -491,41 +553,10 @@ def cargar_usuarios() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=60, show_spinner=False)
-def cargar_super_bowl() -> pd.DataFrame:
-    sb = get_supabase()
-    res = (
-        sb.table("super_bowl_predictions")
-        .select("email, campeon, subcampeon")
-        .limit(LIMITE)
-        .execute()
-    )
-    df = pd.DataFrame(res.data or [])
-    if df.empty:
-        return pd.DataFrame(columns=["email", "campeon", "subcampeon"])
-    df["email"] = df["email"].astype(str).str.lower().str.strip()
-    return df
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def cargar_configuracion() -> dict:
-    sb = get_supabase()
-    res = (
-        sb.table("tournament_settings")
-        .select("id, actual_champion, actual_subcampeon")
-        .order("id")
-        .limit(LIMITE)
-        .execute()
-    )
-    filas = res.data or []
-    return filas[-1] if filas else {"id": 1, "actual_champion": None, "actual_subcampeon": None}
-
-
 def invalidar_cache() -> None:
     """Se llama tras cada escritura para que la UI refleje el dato nuevo."""
     for fn in (
-        cargar_partidos, cargar_predicciones, cargar_resultados,
-        cargar_usuarios, cargar_super_bowl, cargar_configuracion,
+        cargar_partidos, cargar_predicciones, cargar_resultados, cargar_usuarios,
     ):
         fn.clear()
 
@@ -569,29 +600,42 @@ def guardar_avatar_url(email: str, url: str | None) -> None:
 
 
 # --- Escrituras --------------------------------------------------------------
-def guardar_pick(email: str, match_id, prediccion: str) -> None:
-    """Inserta o actualiza el pick del usuario para un partido."""
+def guardar_pick(email: str, match_id, prediccion: str) -> bool:
+    """
+    Inserta o actualiza el pick del usuario para un partido.
+
+    Devuelve False si la base rechazo la escritura. Quien decide de verdad si el
+    voto sigue abierto es la politica RLS `partido_abierto()`, no esta funcion:
+    la interfaz solo dibuja el formulario mientras falta para el kickoff, pero
+    cualquiera puede llamar a la API por su cuenta. Aqui se atrapa ese rechazo
+    para que el caso limite -votar en el segundo exacto del arranque- muestre un
+    aviso en vez de un error de Python.
+    """
     sb = get_supabase()
     email = email.lower().strip()
     if es_admin(email):   # el arbitro no compite
-        return
-    existente = (
-        sb.table("predictions")
-        .select("id")
-        .eq("email", email)
-        .eq("match_id", match_id)
-        .limit(1)
-        .execute()
-    )
-    if existente.data:
-        sb.table("predictions").update({"prediction": prediccion}).eq(
-            "id", existente.data[0]["id"]
-        ).execute()
-    else:
-        sb.table("predictions").insert(
-            {"email": email, "match_id": match_id, "prediction": prediccion}
-        ).execute()
+        return False
+    try:
+        existente = (
+            sb.table("predictions")
+            .select("id")
+            .eq("email", email)
+            .eq("match_id", match_id)
+            .limit(1)
+            .execute()
+        )
+        if existente.data:
+            sb.table("predictions").update({"prediction": prediccion}).eq(
+                "id", existente.data[0]["id"]
+            ).execute()
+        else:
+            sb.table("predictions").insert(
+                {"email": email, "match_id": match_id, "prediction": prediccion}
+            ).execute()
+    except Exception:
+        return False
     invalidar_cache()
+    return True
 
 
 def guardar_resultado(match_id, local: int, visitante: int, ganador: str,
@@ -614,31 +658,6 @@ def guardar_resultado(match_id, local: int, visitante: int, ganador: str,
         sb.table("results").update(payload).eq("match_id", match_id).execute()
     else:
         sb.table("results").insert(payload).execute()
-    invalidar_cache()
-
-
-def guardar_super_bowl_pick(email: str, campeon: str, subcampeon: str) -> None:
-    sb = get_supabase()
-    email = email.lower().strip()
-    if es_admin(email):   # el arbitro no compite
-        return
-    payload = {"email": email, "campeon": campeon, "subcampeon": subcampeon}
-    existente = sb.table("super_bowl_predictions").select("email").eq("email", email).limit(1).execute()
-    if existente.data:
-        sb.table("super_bowl_predictions").update(payload).eq("email", email).execute()
-    else:
-        sb.table("super_bowl_predictions").insert(payload).execute()
-    invalidar_cache()
-
-
-def guardar_configuracion(campeon: str | None, subcampeon: str | None) -> None:
-    sb = get_supabase()
-    cfg = cargar_configuracion()
-    payload = {"actual_champion": campeon, "actual_subcampeon": subcampeon}
-    if cfg.get("id"):
-        sb.table("tournament_settings").update(payload).eq("id", cfg["id"]).execute()
-    else:
-        sb.table("tournament_settings").insert({"id": 1, **payload}).execute()
     invalidar_cache()
 
 
@@ -704,31 +723,12 @@ def etiqueta_semana(semana: int) -> str:
     return ETIQUETA_SEMANA.get(int(semana), f"Semana {int(semana)}")
 
 
-def inicio_temporada(partidos: pd.DataFrame):
-    """Kickoff del primer partido de la semana 1. None si no hay calendario."""
-    if partidos.empty:
-        return None
-    semana1 = partidos[(partidos["semana"] == 1) & partidos["fecha_hora"].notna()]
-    if semana1.empty:
-        return None
-    return semana1["fecha_hora"].min()
-
-
-def super_bowl_cerrado(partidos: pd.DataFrame) -> bool:
-    """
-    Los pronosticos de Super Bowl se cierran con el primer kickoff de la
-    temporada. Es una apuesta de pretemporada: si se pudiera ajustar despues,
-    bastaria esperar a conocer a los finalistas para asegurar los 10 puntos.
-    """
-    arranque = inicio_temporada(partidos)
-    return ya_inicio(arranque) if arranque is not None else False
-
-
 # -----------------------------------------------------------------------------
 #  8. MOTOR DE PUNTUACION
 #     Regular : 1 punto por acertar al ganador directo (Moneyline, sin spread).
-#     Empates : contemplados como opcion valida (raros pero posibles).
-#     Super Bowl : 10 pts campeon + 5 pts subcampeon.
+#     Playoffs: la ronda define cuanto vale, hasta 5 por el Super Bowl.
+#     Empates : no son votables. Si un partido termina empatado ningun pick
+#               coincide con el resultado, asi que nadie suma en ese partido.
 # -----------------------------------------------------------------------------
 def ganador_por_marcador(local: int, visitante: int) -> str:
     if local > visitante:
@@ -781,14 +781,13 @@ def calcular_ranking(
     predicciones: pd.DataFrame,
     partidos: pd.DataFrame,
     resultados: pd.DataFrame,
-    sb_picks: pd.DataFrame,
-    config: dict,
 ) -> pd.DataFrame:
-    """Tabla general: aciertos de temporada regular + bonus de Super Bowl."""
+    """
+    Tabla general: se arma solo con los aciertos partido a partido, ponderados
+    por ronda. No hay bonus de pretemporada; el Super Bowl pesa como partido.
+    """
     # Red de seguridad: el admin nunca entra al ranking, aunque llegue sin filtrar.
-    usuarios, predicciones, sb_picks = (
-        sin_admin(usuarios), sin_admin(predicciones), sin_admin(sb_picks)
-    )
+    usuarios, predicciones = sin_admin(usuarios), sin_admin(predicciones)
     ganadores = mapa_ganadores(partidos, resultados)
 
     # Jornada de cada partido: define cuanto vale acertarlo.
@@ -806,29 +805,28 @@ def calcular_ranking(
             aciertos[p["email"]] += 1
             puntos[p["email"]] += puntos_de_semana(semana_de.get(p["match_id"], 1))
 
-    campeon_real = resolver_equipo(config.get("actual_champion") or "")
-    sub_real = resolver_equipo(config.get("actual_subcampeon") or "")
-    bonus: dict[str, int] = defaultdict(int)
-    for s in sb_picks.to_dict("records"):
-        if campeon_real and resolver_equipo(s.get("campeon") or "") == campeon_real:
-            bonus[s["email"]] += PUNTOS_CAMPEON
-        if sub_real and resolver_equipo(s.get("subcampeon") or "") == sub_real:
-            bonus[s["email"]] += PUNTOS_SUBCAMPEON
-
     # Universo de participantes: registrados + cualquiera con actividad
-    emails = set(usuarios["email"].tolist()) | set(predicciones["email"].tolist()) | set(sb_picks["email"].tolist())
+    emails = set(usuarios["email"].tolist()) | set(predicciones["email"].tolist())
     nombres = dict(zip(usuarios["email"], usuarios["username"]))
     imagenes = (
         dict(zip(usuarios["email"], usuarios["avatar_url"]))
         if "avatar_url" in usuarios.columns else {}
     )
 
+    # Los picks de partidos aun abiertos solo los ve su autor: la politica
+    # `predictions_select` no entrega los ajenos hasta el cierre. Si la columna
+    # "Picks" contara todo lo que hay en el dataframe, cada quien veria su
+    # propia fila inflada frente a las demas. Contando unicamente partidos ya
+    # cerrados, la tabla sale identica para todos.
+    ids_cerrados = {
+        r["id"] for r in partidos.to_dict("records") if esta_bloqueado(r)
+    }
+    picks_visibles = predicciones[predicciones["match_id"].isin(ids_cerrados)]
+
     filas = []
-    total_picks = len(predicciones)
     for em in emails:
         pts_partidos = puntos.get(em, 0)
         n_aciertos = aciertos.get(em, 0)
-        pts_sb = bonus.get(em, 0)
         cerrados = jugados.get(em, 0)
         nombre_part = nombres.get(em) or em.split("@")[0]
         filas.append(
@@ -837,12 +835,10 @@ def calcular_ranking(
                 "Avatar": avatares.avatar_de(nombre_part, imagenes.get(em)),
                 "Participante": nombre_part,
                 "Aciertos": n_aciertos,
-                "Puntos partidos": pts_partidos,
                 "Calificados": cerrados,
                 "Efectividad": round(100 * n_aciertos / cerrados, 1) if cerrados else 0.0,
-                "Super Bowl": pts_sb,
-                "Total": pts_partidos + pts_sb,
-                "Picks": int((predicciones["email"] == em).sum()) if total_picks else 0,
+                "Total": pts_partidos,
+                "Picks": int((picks_visibles["email"] == em).sum()),
             }
         )
     df = pd.DataFrame(filas)
@@ -1095,15 +1091,20 @@ def pantalla_auth() -> None:
             else:
                 try:
                     sesion = sb.auth.sign_in_with_password({"email": email, "password": password})
+                    # El correo de la sesion manda sobre el que se tecleo: es el
+                    # que Supabase acaba de autenticar y el que evaluara RLS.
+                    email = _email_de_sesion(sesion) or email
                     perfil = obtener_perfil(email)
                     if perfil is None:
-                        # Auto-reparacion: existe en Auth pero no tenia perfil publico
+                        # Auto-reparacion: existe en Auth pero no tenia perfil
+                        # publico (cuentas anteriores al trigger de `07_seguridad`).
+                        # Va autenticado, asi que la politica users_insert lo acepta.
                         sb.table("users").insert(
                             {"username": email.split("@")[0], "email": email}
                         ).execute()
                         perfil = obtener_perfil(email)
                     refresh = getattr(getattr(sesion, "session", None), "refresh_token", None)
-                    guardar_cookies(email, refresh)
+                    guardar_cookies(refresh)
                     st.session_state["usuario"] = perfil
                     invalidar_cache()
                     st.success("Bienvenido de vuelta.")
@@ -1127,7 +1128,7 @@ def pantalla_auth() -> None:
         with st.form("form_registro", clear_on_submit=False):
             nuevo_user = st.text_input("Nombre de usuario", placeholder="Como te veran en el ranking")
             nuevo_email = st.text_input("Correo electronico", key="reg_mail")
-            nueva_pass = st.text_input("Contrasena (min. 6 caracteres)", type="password", key="reg_pass")
+            nueva_pass = st.text_input("Contrasena (min. 8 caracteres)", type="password", key="reg_pass")
             confirmar = st.text_input("Confirmar contrasena", type="password")
             crear = st.form_submit_button("Registrarme", use_container_width=True, type="primary")
         if crear:
@@ -1137,23 +1138,35 @@ def pantalla_auth() -> None:
                 st.warning("Completa todos los campos.")
             elif nueva_pass != confirmar:
                 st.warning("Las contrasenas no coinciden.")
-            elif len(nueva_pass) < 6:
-                st.warning("La contrasena debe tener al menos 6 caracteres.")
-            elif obtener_perfil(nuevo_email):
-                st.error("Ese correo ya esta registrado. Inicia sesion.")
+            elif len(nueva_pass) < 8:
+                st.warning("La contrasena debe tener al menos 8 caracteres.")
             else:
+                # No se consulta si el correo ya existe: responder "ese correo ya
+                # esta registrado" permitiria averiguar quien juega probando
+                # direcciones, justo lo que el login evita con su mensaje
+                # generico. El indice unico de `users` y el propio Supabase Auth
+                # impiden el duplicado, y el mensaje de abajo sirve para los dos
+                # casos sin revelar cual ocurrio.
                 try:
-                    sb.auth.sign_up({"email": nuevo_email, "password": nueva_pass})
-                    sb.table("users").insert(
-                        {"username": nuevo_user, "email": nuevo_email}
-                    ).execute()
+                    sb.auth.sign_up({
+                        "email": nuevo_email,
+                        "password": nueva_pass,
+                        # El perfil publico lo crea el trigger `crear_perfil_usuario`
+                        # con este dato. Insertarlo desde aqui exigiria escritura
+                        # anonima en `users`, que la politica RLS ya no permite.
+                        "options": {"data": {"username": nuevo_user}},
+                    })
                     invalidar_cache()
                     st.success(
-                        "Cuenta creada. Si tu proyecto exige confirmacion por correo, "
-                        "revisa tu bandeja antes de entrar."
+                        "Listo. Si el correo es valido y no estaba registrado, te "
+                        "enviamos un enlace de confirmacion: revisa tu bandeja y "
+                        "la carpeta de spam antes de iniciar sesion."
                     )
-                except Exception as exc:
-                    st.error(f"No fue posible registrar la cuenta: {exc}")
+                except Exception:
+                    st.error(
+                        "No fue posible completar el registro. Revisa los datos e "
+                        "intentalo de nuevo."
+                    )
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1226,10 +1239,10 @@ def panel_avatar(usuario: dict) -> None:
             else:
                 try:
                     vista = avatares.procesar_imagen(datos)
-                except Exception as exc:
+                except Exception:
                     st.error(
                         "No se pudo leer esa imagen. Prueba con una foto en "
-                        f"formato JPG o PNG. ({exc})"
+                        "formato JPG o PNG."
                     )
                     vista = None
 
@@ -1258,14 +1271,20 @@ def panel_avatar(usuario: dict) -> None:
                                 st.toast("Foto guardada.")
                                 st.rerun()
                             except Exception as exc:
-                                detalle = str(exc)
-                                if "Bucket not found" in detalle:
+                                # Solo se detalla el error de configuracion, que
+                                # le sirve al admin para saber que le falta. El
+                                # resto se responde en generico: el texto crudo
+                                # de la excepcion describe la infraestructura.
+                                if "Bucket not found" in str(exc):
                                     st.error(
                                         "Falta crear el almacenamiento de avatares. "
                                         "Ejecuta `sql/05_avatares.sql` en Supabase."
                                     )
                                 else:
-                                    st.error(f"No se pudo subir la foto: {detalle}")
+                                    st.error(
+                                        "No se pudo subir la foto. Intentalo de "
+                                        "nuevo en un momento."
+                                    )
 
         # --- Volver al avatar automatico ---
         if actual:
@@ -1433,7 +1452,9 @@ def tab_picks(usuario: dict, partidos: pd.DataFrame, predicciones: pd.DataFrame,
                 st.markdown(bloque_equipo(visita, sub_vis, alinear_derecha=True), unsafe_allow_html=True)
 
             # --- Formulario de voto ---
-            opciones = [PICK_LOCAL, PICK_VISITANTE, PICK_EMPATE]
+            # Solo se vota equipo. EMPATE sigue en `etiquetas` porque el marcador
+            # oficial si puede terminar empatado y hay que saber nombrarlo.
+            opciones = OPCIONES_PICK
             etiquetas = {
                 PICK_LOCAL: nombre_corto(local),
                 PICK_VISITANTE: nombre_corto(visita),
@@ -1445,7 +1466,9 @@ def tab_picks(usuario: dict, partidos: pd.DataFrame, predicciones: pd.DataFrame,
             elif bloqueado:
                 if mi_pick:
                     icono = ""
-                    if ganador:
+                    if ganador == PICK_EMPATE:
+                        icono = " (el partido termino empatado: nadie suma)"
+                    elif ganador:
                         icono = " (acierto +1)" if mi_pick == ganador else " (sin puntos)"
                     st.info(f"Tu pick: **{etiquetas.get(mi_pick, mi_pick)}**{icono}")
                 else:
@@ -1460,47 +1483,67 @@ def tab_picks(usuario: dict, partidos: pd.DataFrame, predicciones: pd.DataFrame,
                     key=f"pick_{mid}",
                 )
                 if seleccion and seleccion != mi_pick:
-                    guardar_pick(email, mid, seleccion)
-                    st.toast(f"Pick guardado: {etiquetas[seleccion]}")
-                    # Sin st.rerun(): se actualizan los conteos en memoria para
-                    # que las barras reflejen el voto de inmediato. Un rerun aqui
-                    # devolveria la vista a la primera seccion en cada pick.
-                    mi_etiqueta = nombres.get(email) or email.split("@")[0]
-                    if mi_pick and mi_etiqueta in votantes[mid][mi_pick]:
-                        votantes[mid][mi_pick].remove(mi_etiqueta)
-                    votantes[mid][seleccion].append(mi_etiqueta)
-                    mapa_mis_picks[mid] = seleccion
-                    mi_pick = seleccion
+                    if not guardar_pick(email, mid, seleccion):
+                        st.warning(
+                            "No se pudo registrar el pick: el partido ya esta "
+                            "cerrado. Recarga la pagina para ver su estado."
+                        )
+                    else:
+                        st.toast(f"Pick guardado: {etiquetas[seleccion]}")
+                        # Se actualiza el estado en memoria en lugar de llamar a
+                        # st.rerun(): un rerun aqui devolveria la vista a la
+                        # primera seccion en cada pick.
+                        #
+                        # Ya no hace falta tocar `votantes`: con el partido
+                        # abierto no se dibujan las barras de la comunidad, asi
+                        # que no hay conteo que refrescar.
+                        mapa_mis_picks[mid] = seleccion
+                        mi_pick = seleccion
 
             # --- Estadisticas de la comunidad ---
-            conteo = votantes.get(mid, {})
-            total_votos = sum(len(v) for v in conteo.values())
-            b1, b2, b3 = st.columns(3)
-            for col, clave, color in (
-                (b1, PICK_LOCAL, color_equipo(local)),
-                (b2, PICK_EMPATE, "#6B7280"),
-                (b3, PICK_VISITANTE, color_equipo(visita)),
-            ):
-                lista = conteo.get(clave, [])
-                with col:
-                    st.markdown(
-                        barra_votos(etiquetas[clave], len(lista), total_votos, color),
-                        unsafe_allow_html=True,
-                    )
+            # Los votos ajenos se destapan al cerrarse el partido: verlos antes
+            # permitiria copiar al lider o esperar al ultimo minuto para ir
+            # contra la mayoria. La politica RLS `predictions_select` ya no los
+            # entrega mientras siga abierto, asi que dibujar aqui las barras
+            # solo mostraria el voto propio y daria un 100% enganoso.
+            # El arbitro es la excepcion: no compite y necesita ver la jornada.
+            if not (bloqueado or arbitro):
+                st.caption(
+                    "Los votos de los demas se revelan cuando el partido cierra."
+                )
+            else:
+                conteo = votantes.get(mid, {})
+                total_votos = sum(len(v) for v in conteo.values())
+                # La columna de empate solo se dibuja si quedan picks historicos
+                # de cuando esa opcion existia; de lo contrario son dos columnas.
+                claves = list(OPCIONES_PICK)
+                if conteo.get(PICK_EMPATE):
+                    claves.insert(1, PICK_EMPATE)
+                colores = {
+                    PICK_LOCAL: color_equipo(local),
+                    PICK_VISITANTE: color_equipo(visita),
+                    PICK_EMPATE: "#6B7280",
+                }
+                for col, clave in zip(st.columns(len(claves)), claves):
+                    lista = conteo.get(clave, [])
+                    with col:
+                        st.markdown(
+                            barra_votos(etiquetas[clave], len(lista), total_votos, colores[clave]),
+                            unsafe_allow_html=True,
+                        )
 
-            with st.expander(f"Quien voto que ({total_votos} votos)"):
-                if total_votos == 0:
-                    st.caption("Sin votos registrados todavia.")
-                else:
-                    e1, e2, e3 = st.columns(3)
-                    for col, clave in ((e1, PICK_LOCAL), (e2, PICK_EMPATE), (e3, PICK_VISITANTE)):
-                        with col:
-                            lista = sorted(conteo.get(clave, []), key=str.lower)
-                            st.markdown(f"**{etiquetas[clave]}** ({len(lista)})")
-                            if lista:
-                                st.markdown("\n".join(f"- {n}" for n in lista))
-                            else:
-                                st.caption("Nadie")
+                with st.expander(f"Quien voto que ({total_votos} votos)"):
+                    if total_votos == 0:
+                        st.caption("Sin votos registrados todavia.")
+                    else:
+                        for col, clave in zip(st.columns(len(claves)), claves):
+                            with col:
+                                lista = sorted(conteo.get(clave, []), key=str.lower)
+                                st.markdown(f"**{etiquetas[clave]}** ({len(lista)})")
+                                if lista:
+                                    st.markdown("\n".join(f"- {n}" for n in lista))
+                                else:
+                                    st.caption("Nadie")
 
     # --- Pie: lugar del usuario en el ranking global ---
     # El arbitro no compite, asi que ve el podio en lugar de una posicion propia.
@@ -1602,157 +1645,7 @@ def tab_posiciones(partidos: pd.DataFrame, resultados: pd.DataFrame) -> None:
 
 
 # -----------------------------------------------------------------------------
-# 13. PESTANA: SUPER BOWL
-# -----------------------------------------------------------------------------
-def formulario_super_bowl(email: str, actual: dict, temporada_cerrada: bool) -> None:
-    """Selector de campeon y subcampeon. Solo para participantes."""
-    st.markdown("#### Mi pronostico")
-
-    abrev_previo = resolver_equipo(actual.get("campeon", "")) or ""
-    conf_previa = NFL_TEAMS.get(abrev_previo, {}).get("conf", "AFC")
-    conf_campeon = st.radio(
-        "Conferencia del campeon",
-        CONFERENCIAS,
-        horizontal=True,
-        index=CONFERENCIAS.index(conf_previa),
-        disabled=temporada_cerrada,
-    )
-    conf_sub = "NFC" if conf_campeon == "AFC" else "AFC"
-
-    ops_campeon = sorted(equipos_por_conferencia(conf_campeon), key=nombre_display)
-    ops_sub = sorted(equipos_por_conferencia(conf_sub), key=nombre_display)
-
-    prev_camp = abrev_previo or ops_campeon[0]
-    prev_sub = resolver_equipo(actual.get("subcampeon", "")) or ops_sub[0]
-
-    campeon = st.selectbox(
-        f"Campeon ({conf_campeon})",
-        ops_campeon,
-        index=ops_campeon.index(prev_camp) if prev_camp in ops_campeon else 0,
-        format_func=nombre_display,
-        disabled=temporada_cerrada,
-    )
-    subcampeon = st.selectbox(
-        f"Subcampeon ({conf_sub})",
-        ops_sub,
-        index=ops_sub.index(prev_sub) if prev_sub in ops_sub else 0,
-        format_func=nombre_display,
-        disabled=temporada_cerrada,
-    )
-    p1, p2 = st.columns(2)
-    with p1:
-        st.markdown(bloque_equipo(campeon, "Mi campeon"), unsafe_allow_html=True)
-    with p2:
-        st.markdown(bloque_equipo(subcampeon, "Mi subcampeon"), unsafe_allow_html=True)
-
-    if st.button(
-        "Guardar pronostico", type="primary", use_container_width=True,
-        disabled=temporada_cerrada,
-    ):
-        guardar_super_bowl_pick(
-            email, nombre_display(campeon), nombre_display(subcampeon)
-        )
-        st.success("Pronostico de Super Bowl guardado.")
-        st.rerun()
-
-    if temporada_cerrada:
-        st.info(
-            "Los pronosticos de Super Bowl estan cerrados: la temporada ya comenzo."
-        )
-
-
-def tab_super_bowl(usuario: dict, sb_picks: pd.DataFrame, usuarios: pd.DataFrame,
-                   config: dict, partidos: pd.DataFrame) -> None:
-    st.subheader("Super Bowl LX")
-    st.caption(
-        f"Campeon acertado = {PUNTOS_CAMPEON} puntos &bull; Subcampeon acertado = "
-        f"{PUNTOS_SUBCAMPEON} puntos. El campeon debe ser de una conferencia y el "
-        "subcampeon de la otra. Los pronosticos se cierran con el primer kickoff "
-        "de la temporada."
-    )
-
-    email = usuario["email"].lower()
-    arbitro = es_admin(email)
-    nombres = dict(zip(usuarios["email"], usuarios["username"]))
-    mio = sb_picks[sb_picks["email"] == email]
-    actual = mio.to_dict("records")[0] if not mio.empty else {}
-
-    campeon_oficial = config.get("actual_champion")
-    sub_oficial = config.get("actual_subcampeon")
-    ya_arranco = super_bowl_cerrado(partidos)
-    temporada_cerrada = bool(campeon_oficial) or ya_arranco
-
-    # Aviso de la fecha limite mientras siga abierto
-    arranque = inicio_temporada(partidos)
-    if not temporada_cerrada and arranque is not None:
-        st.warning(
-            f"Tienes hasta el primer kickoff de la temporada para definir tu "
-            f"pronostico: **{formato_fecha(arranque)}**. Despues ya no podras cambiarlo."
-        )
-
-    if temporada_cerrada:
-        st.success(
-            f"Resultado oficial declarado: campeon **{nombre_display(campeon_oficial)}**"
-            + (f", subcampeon **{nombre_display(sub_oficial)}**." if sub_oficial else ".")
-        )
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown(bloque_equipo(campeon_oficial, "Campeon"), unsafe_allow_html=True)
-        with c2:
-            if sub_oficial:
-                st.markdown(bloque_equipo(sub_oficial, "Subcampeon"), unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # El admin arbitra: ve las estadisticas de la comunidad pero no pronostica.
-    if arbitro:
-        st.info(
-            "Modo arbitro: la cuenta administradora no pronostica el Super Bowl. "
-            "El campeon y subcampeon oficiales se declaran desde el Panel Admin."
-        )
-        col_stats = st.container()
-    else:
-        col_form, col_stats = st.columns([1, 1.15])
-        with col_form:
-            formulario_super_bowl(email, actual, temporada_cerrada)
-
-    # --- Estadisticas de la comunidad ---
-    with col_stats:
-        st.markdown("#### Quien voto por quien")
-        if sb_picks.empty:
-            st.caption("Nadie ha registrado su pronostico de Super Bowl.")
-            return
-
-        def agrupar(columna: str) -> dict[str, list[str]]:
-            grupos: dict[str, list[str]] = defaultdict(list)
-            for fila in sb_picks.to_dict("records"):
-                valor = fila.get(columna)
-                if not valor:
-                    continue
-                clave = resolver_equipo(valor) or str(valor)
-                grupos[clave].append(nombres.get(fila["email"]) or fila["email"].split("@")[0])
-            return grupos
-
-        for titulo, columna in (("Campeon", "campeon"), ("Subcampeon", "subcampeon")):
-            grupos = agrupar(columna)
-            total = sum(len(v) for v in grupos.values())
-            st.markdown(f"**{titulo}** &bull; {total} votos", unsafe_allow_html=True)
-            for clave, gente in sorted(grupos.items(), key=lambda kv: -len(kv[1])):
-                c_logo, c_barra = st.columns([1, 7])
-                with c_logo:
-                    st.image(logo_url(clave), width=34)
-                with c_barra:
-                    st.markdown(
-                        barra_votos(nombre_display(clave), len(gente), total, color_equipo(clave)),
-                        unsafe_allow_html=True,
-                    )
-                    with st.expander(f"Ver {len(gente)} votante(s)"):
-                        st.markdown("\n".join(f"- {n}" for n in sorted(gente, key=str.lower)))
-            st.markdown("---")
-
-
-# -----------------------------------------------------------------------------
-# 14. PESTANA: RANKING GLOBAL
+# 13. PESTANA: RANKING GLOBAL
 # -----------------------------------------------------------------------------
 def tab_ranking(usuario: dict, ranking: pd.DataFrame) -> None:
     st.subheader("Ranking Global")
@@ -1798,9 +1691,11 @@ def tab_ranking(usuario: dict, ranking: pd.DataFrame) -> None:
                 )
 
     st.markdown("#### Tabla general")
+    # "Puntos partidos" y "Total" eran la misma cifra en cuanto desaparecio el
+    # bonus de pretemporada, asi que se muestra una sola columna.
     vista = ranking[
         ["Pos", "Avatar", "Participante", "Picks", "Calificados", "Aciertos",
-         "Puntos partidos", "Super Bowl", "Total", "Efectividad"]
+         "Total", "Efectividad"]
     ].copy()
     st.dataframe(
         vista,
@@ -1810,15 +1705,13 @@ def tab_ranking(usuario: dict, ranking: pd.DataFrame) -> None:
         column_config={
             "Pos": st.column_config.NumberColumn("#", width="small"),
             "Avatar": st.column_config.ImageColumn("", width="small"),
-            "Picks": st.column_config.NumberColumn("Picks", help="Pronosticos registrados"),
+            "Picks": st.column_config.NumberColumn(
+                "Picks",
+                help="Pronosticos registrados en partidos ya cerrados. Los de "
+                     "partidos abiertos no se muestran hasta el kickoff.",
+            ),
             "Calificados": st.column_config.NumberColumn("Cerrados", help="Partidos ya con resultado"),
             "Aciertos": st.column_config.NumberColumn("Aciertos", help="Partidos acertados"),
-            "Puntos partidos": st.column_config.NumberColumn(
-                "Pts partidos",
-                help="1 pt en temporada regular; 2 Comodines, 3 Divisional, "
-                     "4 Final de Conferencia, 5 Super Bowl",
-            ),
-            "Super Bowl": st.column_config.NumberColumn("Bonus SB", help="10 campeon / 5 subcampeon"),
             "Total": st.column_config.ProgressColumn(
                 "Total",
                 format="%d",
@@ -1841,7 +1734,8 @@ def tab_ranking(usuario: dict, ranking: pd.DataFrame) -> None:
         st.markdown(
             f"""
             **Partidos** &mdash; se acierta eligiendo al ganador directo
-            (Moneyline, sin spread). El empate cuenta como opcion valida.
+            (Moneyline, sin spread). Solo se elige entre los dos equipos: si el
+            partido termina empatado &mdash;algo excepcional&mdash; nadie suma.
 
             | Jornada | Puntos por acierto |
             |---|---|
@@ -1852,12 +1746,8 @@ def tab_ranking(usuario: dict, ranking: pd.DataFrame) -> None:
             | Super Bowl | {PUNTOS_POR_RONDA[22]} |
 
             Las rondas finales valen mas para que la quiniela siga viva en enero
-            en vez de quedar decidida en noviembre.
-
-            **Super Bowl** &mdash; aparte del partido, el pronostico de
-            pretemporada otorga **{PUNTOS_CAMPEON} puntos** por acertar al campeon
-            y **{PUNTOS_SUBCAMPEON}** por el subcampeon. Se define antes del primer
-            kickoff y despues ya no puede cambiarse.
+            en vez de quedar decidida en noviembre. El Super Bowl es el partido
+            que mas pesa, y se acierta como cualquier otro: eligiendo al ganador.
 
             **Efectividad** &mdash; porcentaje de aciertos sobre partidos ya
             cerrados. No pondera por ronda: sirve para comparar puntería entre
@@ -1867,7 +1757,7 @@ def tab_ranking(usuario: dict, ranking: pd.DataFrame) -> None:
 
 
 # -----------------------------------------------------------------------------
-# 15. PESTANA: PANEL ADMIN
+# 14. PESTANA: PANEL ADMIN
 #     Solo visible si el correo de la sesion coincide con secrets["ADMIN_EMAIL"].
 # -----------------------------------------------------------------------------
 def panel_sincronizacion(partidos: pd.DataFrame, resultados: pd.DataFrame) -> None:
@@ -2012,7 +1902,7 @@ def panel_sincronizacion(partidos: pd.DataFrame, resultados: pd.DataFrame) -> No
 
 
 def tab_admin(partidos: pd.DataFrame, resultados: pd.DataFrame,
-              predicciones: pd.DataFrame, config: dict) -> None:
+              predicciones: pd.DataFrame) -> None:
     st.subheader("Panel de Administracion")
     st.caption("Captura de marcadores oficiales, control de bloqueos y cierre de temporada.")
 
@@ -2022,8 +1912,7 @@ def tab_admin(partidos: pd.DataFrame, resultados: pd.DataFrame,
 
     # Mismo motivo que en la navegacion principal: con st.tabs, cada st.rerun()
     # (guardar un marcador, mover un bloqueo) devolvia el panel a "Sincronizar".
-    SECCIONES = ["Sincronizar", "Marcadores", "Bloqueos", "Cierre de temporada",
-                 "Avatares", "Diagnostico"]
+    SECCIONES = ["Sincronizar", "Marcadores", "Bloqueos", "Avatares", "Diagnostico"]
     if st.session_state.get("nav_admin") not in SECCIONES:
         st.session_state["nav_admin"] = SECCIONES[0]
     sub = st.segmented_control(
@@ -2146,47 +2035,12 @@ def tab_admin(partidos: pd.DataFrame, resultados: pd.DataFrame,
                 set_bloqueo_partido(mid, nuevo)
                 st.rerun()
 
-    # --- Cierre de temporada / Super Bowl -------------------------------------
-    if sub == "Cierre de temporada":
-        st.caption(
-            f"Al declarar al campeon oficial se otorgan {PUNTOS_CAMPEON} puntos a quienes "
-            f"lo acertaron y {PUNTOS_SUBCAMPEON} a quienes acertaron el subcampeon."
-        )
-        abrevs = sorted(NFL_TEAMS.keys(), key=nombre_display)
-        actual_camp = resolver_equipo(config.get("actual_champion") or "")
-        actual_sub = resolver_equipo(config.get("actual_subcampeon") or "")
+    # Ya no hay seccion de "Cierre de temporada": servia para declarar campeon y
+    # subcampeon oficiales, que era lo unico que activaba el bonus. El Super Bowl
+    # ahora se cierra capturando su marcador en "Marcadores", como cualquier otro
+    # partido de la jornada 22.
 
-        c1, c2 = st.columns(2)
-        with c1:
-            campeon = st.selectbox(
-                "Campeon oficial", ["(sin declarar)"] + abrevs,
-                index=(abrevs.index(actual_camp) + 1) if actual_camp in abrevs else 0,
-                format_func=lambda a: a if a == "(sin declarar)" else nombre_display(a),
-            )
-            if campeon != "(sin declarar)":
-                st.markdown(bloque_equipo(campeon, "Campeon"), unsafe_allow_html=True)
-        with c2:
-            sub = st.selectbox(
-                "Subcampeon oficial", ["(sin declarar)"] + abrevs,
-                index=(abrevs.index(actual_sub) + 1) if actual_sub in abrevs else 0,
-                format_func=lambda a: a if a == "(sin declarar)" else nombre_display(a),
-            )
-            if sub != "(sin declarar)":
-                st.markdown(bloque_equipo(sub, "Subcampeon"), unsafe_allow_html=True)
-
-        if campeon != "(sin declarar)" and sub != "(sin declarar)":
-            if NFL_TEAMS[campeon]["conf"] == NFL_TEAMS[sub]["conf"]:
-                st.error("Campeon y subcampeon deben pertenecer a conferencias distintas.")
-
-        if st.button("Publicar resultado oficial", type="primary"):
-            guardar_configuracion(
-                nombre_display(campeon) if campeon != "(sin declarar)" else None,
-                nombre_display(sub) if sub != "(sin declarar)" else None,
-            )
-            st.success("Configuracion del torneo actualizada. El ranking ya refleja el bonus.")
-            st.rerun()
-
-    # --- Diagnostico ----------------------------------------------------------
+    # --- Moderacion de avatares -----------------------------------------------
     if sub == "Avatares":
         st.caption(
             "Retira la imagen de cualquier participante si resulta inapropiada. "
@@ -2261,7 +2115,7 @@ def tab_admin(partidos: pd.DataFrame, resultados: pd.DataFrame,
 
 
 # -----------------------------------------------------------------------------
-# 16. ORQUESTADOR PRINCIPAL
+# 15. ORQUESTADOR PRINCIPAL
 # -----------------------------------------------------------------------------
 def main() -> None:
     st.session_state.setdefault("tz", "America/Mexico_City")
@@ -2280,7 +2134,6 @@ def main() -> None:
     # Carga unica por render; todas las consultas van con .limit(10000)
     partidos = cargar_partidos()
     resultados = cargar_resultados()
-    config = cargar_configuracion()
 
     # El administrador arbitra y no compite: se le excluye de todo lo que
     # alimenta el ranking y las estadisticas de la comunidad. Los datos crudos
@@ -2288,9 +2141,8 @@ def main() -> None:
     predicciones_todas = cargar_predicciones()
     predicciones = sin_admin(predicciones_todas)
     usuarios = sin_admin(cargar_usuarios())
-    sb_picks = sin_admin(cargar_super_bowl())
 
-    ranking = calcular_ranking(usuarios, predicciones, partidos, resultados, sb_picks, config)
+    ranking = calcular_ranking(usuarios, predicciones, partidos, resultados)
 
     # Los emojis solo se usan como iconografia de navegacion, NUNCA para equipos.
     #
@@ -2298,7 +2150,7 @@ def main() -> None:
     # a la primera pestana cuando el script hace st.rerun() (al guardar un pick,
     # un marcador o un avatar), lo que hacia "saltar" la vista. Este control
     # guarda su seleccion en session_state y sobrevive a cualquier rerun.
-    titulos = ["🏈 Mis Picks", "🏆 Posiciones NFL", "💍 Super Bowl", "📊 Ranking Global"]
+    titulos = ["🏈 Mis Picks", "🏆 Posiciones NFL", "📊 Ranking Global"]
     if es_admin(usuario.get("email")):
         titulos.append("⚙️ Panel Admin")
 
@@ -2319,11 +2171,9 @@ def main() -> None:
     elif seccion == titulos[1]:
         tab_posiciones(partidos, resultados)
     elif seccion == titulos[2]:
-        tab_super_bowl(usuario, sb_picks, usuarios, config, partidos)
-    elif seccion == titulos[3]:
         tab_ranking(usuario, ranking)
     elif seccion == "⚙️ Panel Admin" and es_admin(usuario.get("email")):
-        tab_admin(partidos, resultados, predicciones_todas, config)
+        tab_admin(partidos, resultados, predicciones_todas)
 
 
 if __name__ == "__main__":
