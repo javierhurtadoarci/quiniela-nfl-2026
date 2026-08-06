@@ -82,7 +82,9 @@ ETIQUETA_SEMANA = {
     19: "Comodines (Wild Card)",
     20: "Divisional",
     21: "Final de Conferencia",
-    22: "Super Bowl LX",
+    # LX se jugo en febrero de 2026 y cerro la temporada 2025; el de esta
+    # temporada, que termina en febrero de 2027, es el LXI.
+    22: "Super Bowl LXI",
 }
 
 # Valores canonicos almacenados en predictions.prediction y results.ganador_oficial
@@ -1106,7 +1108,7 @@ def encabezado(usuario: dict | None = None) -> None:
         nombre = (usuario.get("username") or usuario.get("email", "").split("@")[0]).strip()
         subtitulo = f"Bienvenido <strong>{html_escape(nombre)}</strong>"
     else:
-        subtitulo = "Pronosticos Moneyline &bull; Temporada Regular, Playoffs y Super Bowl LX"
+        subtitulo = "Pronosticos Moneyline &bull; Temporada Regular, Playoffs y Super Bowl LXI"
 
     st.markdown(
         f"""

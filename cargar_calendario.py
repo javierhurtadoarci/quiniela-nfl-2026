@@ -13,9 +13,26 @@
 #    python cargar_calendario.py --playoffs      # incluye comodines..Super Bowl
 #    python cargar_calendario.py --subir         # ademas inserta en Supabase
 #
+#  CUANDO CARGAR LOS PLAYOFFS
+#  ---------------------------------------------------------------------------
+#  Al terminar la semana 18 y antes de los comodines. Hasta ese momento ESPN
+#  publica esas rondas con ambos equipos como 'TBD' y el script las descarta:
+#
+#    python cargar_calendario.py --solo-playoffs --subir --simular   # en seco
+#    python cargar_calendario.py --solo-playoffs --subir             # de verdad
+#
+#  CLAVE NECESARIA PARA --subir
+#  ---------------------------------------------------------------------------
+#  La tabla `matches` solo la escribe el administrador (politica `matches_admin`),
+#  asi que hace falta la service_role en .streamlit/secrets.toml:
+#
+#    SUPABASE_SERVICE_KEY = "..."     # Supabase -> Settings -> API Keys
+#
+#  Ese archivo esta en .gitignore. NUNCA pongas esa clave en el panel de
+#  secretos de Streamlit Cloud: se salta todas las politicas de seguridad.
+#
 #  No requiere instalar nada: usa solo la libreria estandar (urllib, csv,
-#  tomllib). El modo --subir si necesita el paquete `supabase` y que
-#  .streamlit/secrets.toml ya tenga tus claves.
+#  tomllib). El modo --subir si necesita el paquete `supabase`.
 #
 #  Las horas se guardan SIEMPRE en UTC (ESPN las entrega asi). La app las
 #  convierte despues a la zona horaria de cada usuario.
@@ -24,6 +41,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import csv
 import json
 import sys
@@ -282,6 +300,41 @@ def _clave(semana, local: str, visitante: str) -> tuple:
     return (int(semana), resolver_equipo(local), resolver_equipo(visitante))
 
 
+def tipo_de_clave(key: str) -> str:
+    """
+    Distingue una clave `service_role` de una publica. Devuelve 'servicio',
+    'publica' o 'desconocida'.
+
+    Importa porque `matches` solo la puede escribir el admin autenticado
+    (politica `matches_admin`). Con la clave publica se lee sin problema, pero
+    todo insert o update lo rechaza RLS, y el error que devuelve Postgres no
+    dice en ningun lado que el problema sea la clave.
+
+    Se mira el formato nuevo por prefijo y el clasico decodificando el payload
+    del JWT, que no requiere validar la firma ni instalar nada: solo se esta
+    leyendo que rol dice traer.
+    """
+    key = (key or "").strip()
+    if key.startswith("sb_secret_"):
+        return "servicio"
+    if key.startswith(("sb_publishable_", "sb_anon_")):
+        return "publica"
+
+    partes = key.split(".")
+    if len(partes) == 3:
+        try:
+            relleno = "=" * (-len(partes[1]) % 4)
+            datos = json.loads(base64.urlsafe_b64decode(partes[1] + relleno))
+            rol = str(datos.get("role", "")).lower()
+            if rol == "service_role":
+                return "servicio"
+            if rol in ("anon", "authenticated"):
+                return "publica"
+        except Exception:
+            pass
+    return "desconocida"
+
+
 def subir_a_supabase(partidos: list[dict], simular: bool = False) -> None:
     """
     Carga idempotente: se puede ejecutar las veces que haga falta sin duplicar.
@@ -311,6 +364,32 @@ def subir_a_supabase(partidos: list[dict], simular: bool = False) -> None:
     key = secretos.get("SUPABASE_SERVICE_KEY") or secretos.get("SUPABASE_KEY")
     if not url or not key:
         sys.exit("secrets.toml no tiene SUPABASE_URL / SUPABASE_KEY.")
+
+    # Sin clave de servicio no hay escritura posible: mejor decirlo aqui, con
+    # instrucciones, que dejar que falle mas adelante con un error de permisos
+    # de Postgres que no explica nada.
+    tipo = tipo_de_clave(key)
+    if tipo == "publica" and not simular:
+        sys.exit(
+            "\nLa clave de secrets.toml es publica (anon) y la tabla `matches` solo\n"
+            "la puede escribir el administrador: RLS va a rechazar la carga.\n"
+            "\n"
+            "Agrega a .streamlit/secrets.toml la clave service_role, que encuentras\n"
+            "en Supabase -> Settings -> API Keys -> Reveal:\n"
+            "\n"
+            '    SUPABASE_SERVICE_KEY = "..."\n'
+            "\n"
+            "Ese archivo esta en .gitignore, asi que no sale de tu equipo. NUNCA la\n"
+            "pongas en el panel de secretos de Streamlit Cloud: ahi vive la app\n"
+            "publica y esa clave se salta todas las politicas de seguridad.\n"
+            "\n"
+            "Mientras tanto puedes ver que cambiaria agregando --simular."
+        )
+    if tipo == "desconocida" and not simular:
+        print(
+            "\nAviso: no se pudo identificar el tipo de clave. Si la carga falla con\n"
+            "un error de permisos, es que no es la service_role."
+        )
 
     cliente = create_client(url, key)
 
